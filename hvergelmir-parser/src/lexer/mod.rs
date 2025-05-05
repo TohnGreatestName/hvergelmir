@@ -1,8 +1,17 @@
-mod keyword;
+pub mod keyword;
+pub mod token_types;
 use std::{iter::Peekable, str::Chars};
 
+use enum_downcast::{EnumDowncast, IntoVariant};
 use keyword::{try_keyword, Keyword};
 use snafu::Snafu;
+use string_interner::{symbol::SymbolU32, DefaultStringInterner};
+use token_types::{
+    Add, Arrow, Colon, Divide, Dot, EqualsAssign, EqualsCompare, GreaterThan, GreaterThanOrEqualTo,
+    Identifier, LeftCurlyBracket, LeftParenthesis, LeftSquareBracket, LessThan, LessThanOrEqualTo,
+    Multiply, Number, RightCurlyBracket, RightParenthesis, RightSquareBracket, StringToken, Subtract,
+    TokenValue,
+};
 
 /// A character position, line and column,
 /// in a source file.
@@ -19,10 +28,10 @@ impl CharPosition {
 }
 
 /// A span, in a file.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Span {
-    start: CharPosition,
-    end: CharPosition,
+    pub start: CharPosition,
+    pub end: CharPosition,
 }
 impl Span {
     pub fn new(start: CharPosition, end: CharPosition) -> Self {
@@ -31,10 +40,48 @@ impl Span {
 }
 
 /// A parsed token, from the lexer.
-#[derive(Debug)]
-pub struct Token {
-    value: TokenType,
+#[derive(Debug, Clone, Copy)]
+pub struct GenericToken {
+    value: TokenValue,
     span: Span,
+}
+
+impl GenericToken {
+    pub fn value(&self) -> &TokenValue {
+        &self.value
+    }
+
+    pub fn span(&self) -> Span {
+        self.span
+    }
+
+    pub fn make_concrete<T>(self) -> Result<Token<T>, Self> where TokenValue: IntoVariant<T> {
+        self.value
+            .enum_downcast::<T>()
+            .map(|v| Token {
+                value: v,
+                span: self.span,
+            })
+            .map_err(|e| GenericToken {
+                value: e,
+                span: self.span,
+            })
+    }
+}
+
+#[derive(Debug)]
+pub struct Token<T> {
+    value: T,
+    span: Span,
+}
+
+impl<T> Token<T> {
+    pub fn value(self) -> T {
+        self.value
+    }
+    pub fn value_ref(&self) -> &T {
+        &self.value
+    }
 }
 
 pub struct CharStream<'a> {
@@ -45,7 +92,7 @@ pub struct CharStream<'a> {
 #[derive(Clone, Copy)]
 pub enum SkipWhitespace {
     No,
-    Yes
+    Yes,
 }
 impl SkipWhitespace {
     pub fn skip(&self) -> bool {
@@ -89,8 +136,11 @@ impl<'a> CharStream<'a> {
         Some(p)
     }
 
-
-    pub fn next_one_matches(&mut self, ws: SkipWhitespace, f: impl Fn(char) -> bool) -> Option<char> {
+    pub fn next_one_matches(
+        &mut self,
+        ws: SkipWhitespace,
+        f: impl Fn(char) -> bool,
+    ) -> Option<char> {
         if self.peek(ws).map(f) == Some(true) {
             self.next(ws)
         } else {
@@ -99,7 +149,8 @@ impl<'a> CharStream<'a> {
     }
 
     pub fn next_one_is(&mut self, c: char) -> bool {
-        self.next_one_matches(SkipWhitespace::Yes, |v| v == c).is_some()
+        self.next_one_matches(SkipWhitespace::Yes, |v| v == c)
+            .is_some()
     }
 
     pub fn pop_span(&mut self) -> Span {
@@ -108,39 +159,12 @@ impl<'a> CharStream<'a> {
         s
     }
 
-    pub fn make_token(&mut self, t: TokenType) -> Token {
-        Token {
+    pub fn make_token(&mut self, t: TokenValue) -> GenericToken {
+        GenericToken {
             value: t,
             span: self.pop_span(),
         }
     }
-}
-#[derive(Debug)]
-pub enum TokenType {
-    Dot,
-    Multiply,
-    Divide,
-    Add,
-    Subtract,
-    Colon,
-    EqualsAssign,
-    EqualsCompare,
-    LessThan,
-    LessThanOrEqualTo,
-    GreaterThan,
-    GreaterThanOrEqualTo,
-    LeftParenthesis,
-    RightParenthesis,
-    LeftSquareBracket,
-    RightSquareBracket,
-    LeftCurlyBracket,
-    RightCurlyBracket,
-    Arrow,
-    Keyword(Keyword),
-    // TODO: Probably intern these. Ha.
-    Identifier(String),
-    String(String),
-    //
 }
 
 #[derive(Debug, Snafu)]
@@ -151,73 +175,104 @@ pub enum LexerError {
     UnclosedQuote { span: Span },
 }
 
-pub fn lexer(mut char_stream: CharStream) -> Result<Vec<Token>, LexerError> {
+pub fn lexer(
+    mut char_stream: CharStream,
+    symbol_table: &mut DefaultStringInterner,
+) -> Result<Vec<GenericToken>, LexerError> {
     let mut tokens = vec![];
     while let Some(next_peek) = char_stream.next(SkipWhitespace::Yes) {
         let ty = match next_peek {
-            '.' => TokenType::Dot,
-            '*' => TokenType::Multiply,
-            '/' => TokenType::Divide,
-            '+' => TokenType::Add,
+            '.' => TokenValue::Dot(Dot),
+            '*' => TokenValue::Multiply(Multiply),
+            '/' => TokenValue::Divide(Divide),
+            '+' => TokenValue::Add(Add),
             '-' => {
                 if char_stream.next_one_is('>') {
-                    TokenType::Arrow
+                    TokenValue::Arrow(Arrow)
                 } else {
-                    TokenType::Subtract
+                    TokenValue::Subtract(Subtract)
                 }
             }
-            ':' => TokenType::Colon,
+            ':' => TokenValue::Colon(Colon),
             '=' => {
                 if char_stream.next_one_is('=') {
-                    TokenType::EqualsCompare
+                    TokenValue::EqualsCompare(EqualsCompare)
                 } else {
-                    TokenType::EqualsAssign
+                    TokenValue::EqualsAssign(EqualsAssign)
                 }
             }
             '<' => {
                 if char_stream.next_one_is('=') {
-                    TokenType::LessThanOrEqualTo
+                    TokenValue::LessThanOrEqualTo(LessThanOrEqualTo)
                 } else {
-                    TokenType::LessThan
+                    TokenValue::LessThan(LessThan)
                 }
             }
             '>' => {
                 if char_stream.next_one_is('=') {
-                    TokenType::GreaterThanOrEqualTo
+                    TokenValue::GreaterThanOrEqualTo(GreaterThanOrEqualTo)
                 } else {
-                    TokenType::GreaterThan
+                    TokenValue::GreaterThan(GreaterThan)
                 }
             }
-            '(' => TokenType::LeftParenthesis,
-            ')' => TokenType::RightParenthesis,
-            '[' => TokenType::LeftSquareBracket,
-            ']' => TokenType::RightSquareBracket,
-            '{' => TokenType::LeftCurlyBracket,
-            '}' => TokenType::RightCurlyBracket,
+            '(' => TokenValue::LeftParenthesis(LeftParenthesis),
+            ')' => TokenValue::RightParenthesis(RightParenthesis),
+            '[' => TokenValue::LeftSquareBracket(LeftSquareBracket),
+            ']' => TokenValue::RightSquareBracket(RightSquareBracket),
+            '{' => TokenValue::LeftCurlyBracket(LeftCurlyBracket),
+            '}' => TokenValue::RightCurlyBracket(RightCurlyBracket),
             '"' => {
                 let mut s = String::new();
                 while !char_stream.next_one_is('"') {
-                    s.push(
-                        char_stream
-                            .next(SkipWhitespace::No)
-                            .ok_or_else(|| LexerError::UnclosedQuote {
-                                span: char_stream.pop_span(),
-                            })?,
-                    );
+                    s.push(char_stream.next(SkipWhitespace::No).ok_or_else(|| {
+                        LexerError::UnclosedQuote {
+                            span: char_stream.pop_span(),
+                        }
+                    })?);
                 }
-                TokenType::String(s)
+                TokenValue::StringToken(StringToken {
+                    symbol: symbol_table.get_or_intern(s),
+                })
             }
             v if v.is_alphabetic() => {
                 let mut s = v.to_string();
-                while let Some(next_char) = char_stream.next_one_matches(SkipWhitespace::No, |v| v.is_alphanumeric()) {
+                while let Some(next_char) =
+                    char_stream.next_one_matches(SkipWhitespace::No, |v| v.is_alphanumeric())
+                {
                     s.push(next_char);
                 }
                 println!("S: {:?}", s);
                 if let Some(kw) = try_keyword(&s) {
-                    TokenType::Keyword(kw)
+                    TokenValue::Keyword(kw)
                 } else {
-                    TokenType::Identifier(s)
+                    TokenValue::Identifier(Identifier {
+                        symbol: symbol_table.get_or_intern(s),
+                    })
                 }
+            }
+            v if v.is_numeric() => {
+                let mut s = v.to_string();
+                let mut has_decimal = false;
+                while let Some(next_char) = char_stream.next_one_matches(SkipWhitespace::No, |v| v.is_numeric() || v == '.') {
+                    if next_char == '.' {
+                        if has_decimal {
+                            break; // Stop if a second decimal point is encountered
+                        }
+                        has_decimal = true;
+                    }
+                    s.push(next_char);
+                }
+                let value = if has_decimal {
+                    let parts: Vec<&str> = s.split('.').collect();
+                    let integer_part = parts[0].parse::<i64>().unwrap();
+                    let fractional_part = parts[1];
+                    let exponent = fractional_part.len() as i64;
+                    let mantissa = format!("{}{}", integer_part, fractional_part).parse::<i64>().unwrap();
+                    (mantissa, -exponent)
+                } else {
+                    (s.parse::<i64>().unwrap(), 0)
+                };
+                TokenValue::Number(Number { value })
             }
             _ => {
                 return Err(LexerError::UnexpectedEndOfFile {
@@ -230,9 +285,15 @@ pub fn lexer(mut char_stream: CharStream) -> Result<Vec<Token>, LexerError> {
     Ok(tokens)
 }
 
+
+
+
+
 #[cfg(test)]
 mod tests {
-    use crate::lexer::{keyword::Keyword, SkipWhitespace, TokenType};
+    use string_interner::{DefaultStringInterner, StringInterner};
+
+    use crate::lexer::{keyword::Keyword, token_types::TokenValue, SkipWhitespace, Token};
 
     use super::{lexer, CharStream};
 
@@ -255,56 +316,81 @@ mod tests {
 
     #[test]
     fn lexer_test() {
-        let lexed = lexer(CharStream::new(" hello -> [  four ] ")).unwrap();
+        let mut interner = DefaultStringInterner::new();
+        let lexed = lexer(CharStream::new(" hello -> [  four ] "), &mut interner).unwrap();
         let mut iter = lexed.iter();
-        let TokenType::Identifier(ref i) = iter.next().unwrap().value else {
+        let TokenValue::Identifier(ref i) = iter.next().unwrap().value else {
             panic!()
         };
-        assert_eq!(i, "hello");
-        assert!(matches!(iter.next().unwrap().value, TokenType::Arrow));
-        assert!(matches!(iter.next().unwrap().value, TokenType::LeftSquareBracket));
-        let TokenType::Identifier(ref i) = iter.next().unwrap().value else {
+        assert_eq!(interner.resolve(i.symbol).unwrap(), "hello");
+        assert!(matches!(iter.next().unwrap().value, TokenValue::Arrow(_)));
+        assert!(matches!(
+            iter.next().unwrap().value,
+            TokenValue::LeftSquareBracket(_)
+        ));
+        let TokenValue::Identifier(ref i) = iter.next().unwrap().value else {
             panic!()
         };
-        assert_eq!(i, "four");
-        assert!(matches!(iter.next().unwrap().value, TokenType::RightSquareBracket));
+        assert_eq!(interner.resolve(i.symbol).unwrap(), "four");
+        assert!(matches!(
+            iter.next().unwrap().value,
+            TokenValue::RightSquareBracket(_)
+        ));
     }
 
     #[test]
     fn lexer_test_2() {
-        let lexed = lexer(CharStream::new("func epic(number: int32) -> int64 { \"hello\" }")).unwrap();
+        let mut interner = DefaultStringInterner::new();
+        let lexed = lexer(
+            CharStream::new("func epic(number: int32) -> int64 { \"hello\" }"),
+            &mut interner,
+        )
+        .unwrap();
         let mut iter = lexed.iter();
 
+        assert!(matches!(
+            iter.next().unwrap().value,
+            TokenValue::Keyword(Keyword::Function)
+        ));
+        let TokenValue::Identifier(ref i) = iter.next().unwrap().value else {
+            panic!()
+        };
+        assert_eq!(interner.resolve(i.symbol).unwrap(), "epic");
+        assert!(matches!(
+            iter.next().unwrap().value,
+            TokenValue::LeftParenthesis(_)
+        ));
+        let TokenValue::Identifier(ref i) = iter.next().unwrap().value else {
+            panic!()
+        };
+        assert_eq!(interner.resolve(i.symbol).unwrap(), "number");
+        assert!(matches!(iter.next().unwrap().value, TokenValue::Colon(_)));
+        let TokenValue::Identifier(ref i) = iter.next().unwrap().value else {
+            panic!()
+        };
+        assert_eq!(interner.resolve(i.symbol).unwrap(), "int32");
+        assert!(matches!(
+            iter.next().unwrap().value,
+            TokenValue::RightParenthesis(_)
+        ));
+        assert!(matches!(iter.next().unwrap().value, TokenValue::Arrow(_)));
 
-        assert!(matches!(iter.next().unwrap().value, TokenType::Keyword(Keyword::Function)));
-        let TokenType::Identifier(ref i) = iter.next().unwrap().value else {
+        let TokenValue::Identifier(ref i) = iter.next().unwrap().value else {
             panic!()
         };
-        assert_eq!(i, "epic");
-        assert!(matches!(iter.next().unwrap().value, TokenType::LeftParenthesis));
-        let TokenType::Identifier(ref i) = iter.next().unwrap().value else {
-            panic!()
-        };
-        assert_eq!(i, "number");
-        assert!(matches!(iter.next().unwrap().value, TokenType::Colon));
-        let TokenType::Identifier(ref i) = iter.next().unwrap().value else {
-            panic!()
-        };
-        assert_eq!(i, "int32");
-        assert!(matches!(iter.next().unwrap().value, TokenType::RightParenthesis));
-        assert!(matches!(iter.next().unwrap().value, TokenType::Arrow));
+        assert_eq!(interner.resolve(i.symbol).unwrap(), "int64");
 
-        let TokenType::Identifier(ref i) = iter.next().unwrap().value else {
+        assert!(matches!(
+            iter.next().unwrap().value,
+            TokenValue::LeftCurlyBracket(_)
+        ));
+        let TokenValue::StringToken(ref i) = iter.next().unwrap().value else {
             panic!()
         };
-        assert_eq!(i, "int64");
-
-        assert!(matches!(iter.next().unwrap().value, TokenType::LeftCurlyBracket));
-        let TokenType::String(ref i) = iter.next().unwrap().value else {
-            panic!()
-        };
-        assert_eq!(i, "hello");
-        assert!(matches!(iter.next().unwrap().value, TokenType::RightCurlyBracket));
-
+        assert_eq!(interner.resolve(i.symbol).unwrap(), "hello");
+        assert!(matches!(
+            iter.next().unwrap().value,
+            TokenValue::RightCurlyBracket(_)
+        ));
     }
 }
