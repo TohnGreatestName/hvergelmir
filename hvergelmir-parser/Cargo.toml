@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+enum_downcast = { version = "0.2.0", features = ["derive"] }
 snafu = "0.8.5"
 string-interner = "0.19.0"
