@@ -17,6 +17,9 @@ mod tests {
         func epic() {
             let x = ((2 + 5) * 3) + 4
             x = x + 1
+            while x < 5 {
+                x = x + 1
+            }
             return x
         }
         
@@ -29,7 +32,7 @@ mod tests {
 
         
 
-        panic!("{:#?}", b);
+        panic!("{}", b.graphviz());
 
     }
 }
