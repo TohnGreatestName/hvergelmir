@@ -1,0 +1,11 @@
+[package]
+name = "hvergelmir-mir"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+generational-arena = "0.2.9"
+hvergelmir-parser = { path = "../hvergelmir-parser" }
+snafu = "0.8.5"
+string-interner = "0.19.0"
+enum_downcast = { version = "0.2.0", features = ["derive"] }
