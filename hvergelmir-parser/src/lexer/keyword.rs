@@ -5,7 +5,8 @@ use crate::syntax::{ParseError, ParseErrorType};
 pub enum Keyword {
     Function,
     Let,
-    Return
+    Return,
+    While
 }
 
 impl Keyword {
@@ -24,6 +25,7 @@ pub fn try_keyword(s: &str) -> Option<Keyword> {
         "func" => Some(Keyword::Function),
         "let" => Some(Keyword::Let),
         "return" => Some(Keyword::Return),
+        "while" => Some(Keyword::While),
         _ => None
     }
 }

@@ -16,7 +16,8 @@ use super::expr::Expr;
 pub enum Statement {
     VariableDeclaration(VariableDeclaration),
     Assignment(Assignment),
-    Return(ReturnStatement)
+    Return(ReturnStatement),
+    StandaloneExpression(Expr),
 }
 
 impl Parseable for Statement {
@@ -30,6 +31,9 @@ impl Parseable for Statement {
             },
             [Assignment : assign] => {
                 Ok(Statement::Assignment(assign))
+            },
+            [Expr : expr] => {
+                Ok(Statement::StandaloneExpression(expr))
             }
         )
     }

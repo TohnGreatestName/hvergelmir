@@ -1,50 +1,82 @@
-use std::{cell::{Ref, RefCell, RefMut}, fmt::Debug, hash::{DefaultHasher, Hash, Hasher}, rc::Rc};
+use std::{
+    cell::{Ref, RefCell, RefMut},
+    fmt::Debug,
+    hash::{DefaultHasher, Hash, Hasher},
+    rc::Rc,
+};
 
+use super::variables::{Variable, VariableStore};
 use generational_arena::{Arena, Index};
 use hvergelmir_parser::lexer::token_types::Number;
-use super::variables::{Variable, VariableStore};
 
 pub type BasicBlockRef = Rc<RefCell<BasicBlock>>;
+
 #[derive(Default)]
 pub struct BlockSequence {
     blocks: Arena<BasicBlockRef>,
-    variables: RefCell<VariableStore>
+    variables: RefCell<VariableStore>,
 }
 
 impl BlockSequence {
     pub fn add_block<'a, 'b>(&'a mut self) -> BasicBlockRef {
-        let b = self.blocks.insert(Rc::new(RefCell::new(BasicBlock::default())));
-        Rc::clone(&self.blocks.get(b).unwrap())
+        let b = self.blocks.insert(Rc::new(RefCell::new(BasicBlock::new(
+            Index::from_raw_parts(0, 0),
+        ))));
+        let r = Rc::clone(&self.blocks.get(b).unwrap());
+        r.borrow_mut().index = b; // assign actual index
+        r
     }
-    pub fn variables(&self) -> RefMut<VariableStore>{ 
+    pub fn variables(&self) -> RefMut<VariableStore> {
         self.variables.borrow_mut()
     }
 }
 
-
-
-#[derive(Default, Debug)]
+#[derive(Debug)]
+pub enum BlockSuccessor {
+    Return(RValue),
+    Jump(Index),
+    ConditionalJump(RValue, Index, Index),
+}
+#[derive(Debug)]
 pub struct BasicBlock {
+    index: Index,
     instructions: Vec<Instruction>,
+    successor: Option<BlockSuccessor>,
 }
 
 impl BasicBlock {
+    pub fn set_successor(&mut self, s: BlockSuccessor) {
+        if self.successor.is_some() {
+            panic!("trying to change successor of block - should have already been calculated");
+        }
+        self.successor = Some(s);
+    }
+
+    pub fn index(&self) -> Index {
+        self.index
+    }
+
+    pub fn new(i: Index) -> Self {
+        Self {
+            index: i,
+            instructions: vec![],
+            successor: None,
+        }
+    }
+
     pub fn inst(&mut self, i: Instruction) {
         self.instructions.push(i);
     }
 }
 
 pub enum Literal {
-    Number(Number)
+    Number(Number),
 }
-
-
 
 pub enum RValue {
     Variable(Variable),
-    Literal(Literal)
+    Literal(Literal),
 }
-
 
 pub enum Instruction {
     Add(Variable, RValue, RValue),
@@ -52,13 +84,15 @@ pub enum Instruction {
     Divide(Variable, RValue, RValue),
     Multiply(Variable, RValue, RValue),
     Assign(Variable, RValue),
-    Return(RValue)
+    LessThan(Variable, RValue, RValue),
+    GreaterThan(Variable, RValue, RValue),
+    Return(RValue),
 }
 
 impl Debug for Literal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Number(arg0) => write!(f, "{:?}", arg0)
+            Self::Number(arg0) => write!(f, "{:?}", arg0),
         }
     }
 }

@@ -1,23 +1,57 @@
 use crate::{
     lexer::{
+        keyword::Keyword,
         token_types::{
-            Add, Divide, Identifier, LeftParenthesis, Multiply, Number, RightParenthesis, Subtract,
+            Add, Divide, GreaterThan, Identifier, LeftParenthesis, LessThan, Multiply, Number, RightParenthesis, Subtract
         },
         Token,
     },
     parse_one_of,
 };
 
-use super::super::{stream::TokenStream, ParseError, Parseable, ParsingContext};
+use super::{
+    super::{stream::TokenStream, ParseError, Parseable, ParsingContext},
+    definition::Block,
+};
+
 #[derive(Debug)]
 pub enum Expr {
     Factor(Box<Factor>),
+    While(Box<WhileExpression>)
 }
 
 impl Parseable for Expr {
     fn parse(c: &ParsingContext, token_stream: &mut TokenStream) -> Result<Self, ParseError> {
-        let factor = token_stream.parse_one::<Factor>(c)?; // Use parse_one
-        Ok(Expr::Factor(Box::new(factor)))
+        parse_one_of!(token_stream, c,
+            [Factor : factor] => {
+                Ok(Expr::Factor(Box::new(factor)))
+            },
+            [WhileExpression : wh] => {
+                Ok(Expr::While(Box::new(wh)))
+            }
+        )
+    }
+}
+#[derive(Debug)]
+pub struct WhileExpression {
+    pub while_token: Token<Keyword>,
+    pub expr: Expr,
+    pub block: Block,
+}
+
+impl Parseable for WhileExpression {
+    fn parse(c: &ParsingContext, token_stream: &mut TokenStream) -> Result<Self, ParseError> {
+        let while_token = token_stream
+            .next_as::<Keyword>()?
+            .map(|v| v.require(Keyword::While))?;
+        token_stream.unambiguous();
+        let expr = token_stream.parse_one::<Expr>(c)?;
+        let block = token_stream.parse_one::<Block>(c)?;
+        Ok(Self {
+            while_token,
+            expr,
+            block
+        })
     }
 }
 
@@ -32,7 +66,6 @@ pub enum Term {
 
 impl Parseable for Term {
     fn parse(c: &ParsingContext, token_stream: &mut TokenStream) -> Result<Self, ParseError> {
-       
         let mut left = if token_stream.peek_as::<LeftParenthesis>().is_ok() {
             token_stream.next_as::<LeftParenthesis>()?;
             token_stream.stack_entry_mut().ambiguous = false; // Mark as unambiguous
@@ -40,7 +73,6 @@ impl Parseable for Term {
             token_stream.next_as::<RightParenthesis>()?;
             Term::Parenthesised(Box::new(expr))
         } else {
-            
             let v = parse_one_of!(token_stream, c,
             [Token<Number> : n] => {
                 Ok(Term::Number(n))
@@ -49,7 +81,7 @@ impl Parseable for Term {
                 Ok(Term::Ident(i))
             }
             )?;
-            
+
             token_stream.stack_entry_mut().ambiguous = false; // Mark as unambiguous
             v
         };
@@ -78,6 +110,9 @@ pub enum Factor {
     Term(Box<Term>),
     Add(Box<Factor>, Token<Add>, Box<Term>),
     Subtract(Box<Factor>, Token<Subtract>, Box<Term>),
+
+    LessThan(Box<Factor>, Token<LessThan>, Box<Term>),
+    GreaterThan(Box<Factor>, Token<GreaterThan>, Box<Term>)
 }
 
 impl Parseable for Factor {
@@ -96,6 +131,20 @@ impl Parseable for Factor {
 
                 let right = token_stream.parse_one::<Term>(c)?; // Use parse_one
                 left = Factor::Subtract(Box::new(left), op, Box::new(right));
+            }
+        }
+
+        while token_stream.peek_as::<LessThan>().is_ok() || token_stream.peek_as::<GreaterThan>().is_ok() {
+            if token_stream.peek_as::<LessThan>().is_ok() {
+                let op = token_stream.next_as::<LessThan>()?;
+
+                let right = token_stream.parse_one::<Term>(c)?; // Use parse_one
+                left = Factor::LessThan(Box::new(left), op, Box::new(right));
+            } else if token_stream.peek_as::<GreaterThan>().is_ok() {
+                let op = token_stream.next_as::<GreaterThan>()?;
+
+                let right = token_stream.parse_one::<Term>(c)?; // Use parse_one
+                left = Factor::GreaterThan(Box::new(left), op, Box::new(right));
             }
         }
 
