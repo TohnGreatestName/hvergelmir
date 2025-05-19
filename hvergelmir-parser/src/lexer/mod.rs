@@ -9,8 +9,8 @@ use string_interner::{symbol::SymbolU32, DefaultStringInterner};
 use token_types::{
     Add, Arrow, Colon, Divide, Dot, EqualsAssign, EqualsCompare, GreaterThan, GreaterThanOrEqualTo,
     Identifier, LeftCurlyBracket, LeftParenthesis, LeftSquareBracket, LessThan, LessThanOrEqualTo,
-    Multiply, Number, RightCurlyBracket, RightParenthesis, RightSquareBracket, StringToken, Subtract,
-    TokenValue,
+    Multiply, Number, RightCurlyBracket, RightParenthesis, RightSquareBracket, StringToken,
+    Subtract, TokenValue,
 };
 
 /// A character position, line and column,
@@ -25,6 +25,13 @@ impl CharPosition {
     pub fn new(col: usize, line: usize) -> Self {
         Self { line, col }
     }
+
+    pub fn newline(&mut self) {
+        self.line += 1;
+        self.col = 0;
+    }
+
+
 }
 
 /// A span, in a file.
@@ -55,7 +62,10 @@ impl GenericToken {
         self.span
     }
 
-    pub fn make_concrete<T>(self) -> Result<Token<T>, Self> where TokenValue: IntoVariant<T> {
+    pub fn make_concrete<T>(self) -> Result<Token<T>, Self>
+    where
+        TokenValue: IntoVariant<T>,
+    {
         self.value
             .enum_downcast::<T>()
             .map(|v| Token {
@@ -69,7 +79,7 @@ impl GenericToken {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Token<T> {
     value: T,
     span: Span,
@@ -81,6 +91,14 @@ impl<T> Token<T> {
     }
     pub fn value_ref(&self) -> &T {
         &self.value
+    }
+
+    pub fn map<U, E>(self, f: impl FnOnce(T) -> Result<U, E>) -> Result<Token<U>, E> {
+        let v = (f)(self.value)?;
+        Ok(Token {
+            span: self.span,
+            value: v,
+        })
     }
 }
 
@@ -114,16 +132,22 @@ impl<'a> CharStream<'a> {
             if c.is_whitespace() && ws.skip() {
                 self.chars.next(); // swallow it
             }
+
+
+            if c.is_whitespace() && ws.skip() {
+                if c != '\n' && (self.current_position.col  == self.last_pop.col) {
+                    self.last_pop.col += 1;
+                }
+            } else {
+                break c;
+            }
             if c == '\n' {
-                self.current_position.line += 1;
+                if self.current_position.line == self.last_pop.line {
+                    self.last_pop.newline();
+                }
+                self.current_position.newline();
             } else {
                 self.current_position.col += 1;
-            }
-            if c.is_whitespace() && ws.skip() {
-                continue;
-            } else {
-                self.current_position.col -= 1;
-                break c;
             }
         };
         Some(c)
@@ -253,7 +277,9 @@ pub fn lexer(
             v if v.is_numeric() => {
                 let mut s = v.to_string();
                 let mut has_decimal = false;
-                while let Some(next_char) = char_stream.next_one_matches(SkipWhitespace::No, |v| v.is_numeric() || v == '.') {
+                while let Some(next_char) =
+                    char_stream.next_one_matches(SkipWhitespace::No, |v| v.is_numeric() || v == '.')
+                {
                     if next_char == '.' {
                         if has_decimal {
                             break; // Stop if a second decimal point is encountered
@@ -267,7 +293,9 @@ pub fn lexer(
                     let integer_part = parts[0].parse::<i64>().unwrap();
                     let fractional_part = parts[1];
                     let exponent = fractional_part.len() as i64;
-                    let mantissa = format!("{}{}", integer_part, fractional_part).parse::<i64>().unwrap();
+                    let mantissa = format!("{}{}", integer_part, fractional_part)
+                        .parse::<i64>()
+                        .unwrap();
                     (mantissa, -exponent)
                 } else {
                     (s.parse::<i64>().unwrap(), 0)
@@ -284,10 +312,6 @@ pub fn lexer(
     }
     Ok(tokens)
 }
-
-
-
-
 
 #[cfg(test)]
 mod tests {

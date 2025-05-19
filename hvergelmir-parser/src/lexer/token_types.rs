@@ -1,4 +1,4 @@
-use std::ops::Div;
+use std::{fmt::Debug, ops::Div};
 
 use enum_downcast::EnumDowncast;
 use string_interner::symbol::SymbolU32;
@@ -46,9 +46,19 @@ pub struct StringToken {
     pub symbol: SymbolU32
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct Number {
     pub value: (i64, i64), // (mantissa, exponent)
+}
+
+impl Debug for Number {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = self.value.0.to_string();
+        if self.value.1 > 0 {
+            s.insert(s.len() - self.value.1 as usize, '.');
+        }
+        write!(f, "{s}")
+    }
 }
 
 #[derive(EnumDowncast, Debug, Clone, Copy)]

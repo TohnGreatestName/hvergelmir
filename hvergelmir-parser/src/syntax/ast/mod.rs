@@ -1,3 +1,3 @@
-mod expr;
-mod statement;
-mod definition;
+pub mod expr;
+pub mod statement;
+pub mod definition;

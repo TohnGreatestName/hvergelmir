@@ -76,6 +76,11 @@ impl<'a> TokenStream<'a> {
             symbol_table,
         }
     }
+
+    pub fn unambiguous(&mut self) {
+        self.stack_entry_mut().ambiguous = false;
+    }
+    
     pub fn symbols(&self) -> &DefaultStringInterner {
         &self.symbol_table
     }
@@ -200,16 +205,17 @@ macro_rules! parse_one_of {
                             break 'pblk Err(e);
                         } else {
                             errors_list.push(($ts.position() - initial_position, e));
+                            $ts.pop_stack(false);
                         }
                     },
                     Ok($ident) => {
-                        return $block;
+                        break 'pblk ($block);
                     }
                 }
             )*
 
             errors_list.sort_by(|a, b| a.0.cmp(&b.0));
-            break 'pblk Err(errors_list.remove(0).1);
+            break 'pblk Err(errors_list.pop().unwrap().1);
         }
 
     };

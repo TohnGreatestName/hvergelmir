@@ -1,20 +1,17 @@
-use crate::lexer::{
-    token_types::{Add, Divide, LeftParenthesis, Multiply, Number, RightParenthesis, Subtract},
-    Token,
+use crate::{
+    lexer::{
+        token_types::{
+            Add, Divide, Identifier, LeftParenthesis, Multiply, Number, RightParenthesis, Subtract,
+        },
+        Token,
+    },
+    parse_one_of,
 };
 
 use super::super::{stream::TokenStream, ParseError, Parseable, ParsingContext};
 #[derive(Debug)]
 pub enum Expr {
     Factor(Box<Factor>),
-}
-
-impl Expr {
-    pub fn evaluate(&self) -> i32 {
-        match self {
-            Expr::Factor(factor) => factor.evaluate(),
-        }
-    }
 }
 
 impl Parseable for Expr {
@@ -27,24 +24,15 @@ impl Parseable for Expr {
 #[derive(Debug)]
 pub enum Term {
     Number(Token<Number>),
+    Ident(Token<Identifier>),
     Parenthesised(Box<Expr>),
     Mul(Box<Term>, Token<Multiply>, Box<Term>),
     Div(Box<Term>, Token<Divide>, Box<Term>),
 }
 
-impl Term {
-    pub fn evaluate(&self) -> i32 {
-        match self {
-            Term::Number(token) => token.value_ref().value.0 as i32,
-            Term::Mul(left, _, right) => left.evaluate() * right.evaluate(),
-            Term::Div(left, _, right) => left.evaluate() / right.evaluate(),
-            Term::Parenthesised(expr) => expr.evaluate(),
-        }
-    }
-}
-
 impl Parseable for Term {
     fn parse(c: &ParsingContext, token_stream: &mut TokenStream) -> Result<Self, ParseError> {
+       
         let mut left = if token_stream.peek_as::<LeftParenthesis>().is_ok() {
             token_stream.next_as::<LeftParenthesis>()?;
             token_stream.stack_entry_mut().ambiguous = false; // Mark as unambiguous
@@ -52,12 +40,22 @@ impl Parseable for Term {
             token_stream.next_as::<RightParenthesis>()?;
             Term::Parenthesised(Box::new(expr))
         } else {
-            let start = token_stream.next_as::<Number>()?;
+            
+            let v = parse_one_of!(token_stream, c,
+            [Token<Number> : n] => {
+                Ok(Term::Number(n))
+            },
+            [Token<Identifier> : i] => {
+                Ok(Term::Ident(i))
+            }
+            )?;
+            
             token_stream.stack_entry_mut().ambiguous = false; // Mark as unambiguous
-            Term::Number(start)
+            v
         };
 
-        while token_stream.peek_as::<Multiply>().is_ok() || token_stream.peek_as::<Divide>().is_ok() {
+        while token_stream.peek_as::<Multiply>().is_ok() || token_stream.peek_as::<Divide>().is_ok()
+        {
             if token_stream.peek_as::<Multiply>().is_ok() {
                 let op = token_stream.next_as::<Multiply>()?;
 
@@ -82,22 +80,10 @@ pub enum Factor {
     Subtract(Box<Factor>, Token<Subtract>, Box<Term>),
 }
 
-impl Factor {
-    pub fn evaluate(&self) -> i32 {
-        match self {
-            Factor::Term(term) => term.evaluate(),
-            Factor::Add(left, _, right) => left.evaluate() + right.evaluate(),
-            Factor::Subtract(left, _, right) => left.evaluate() - right.evaluate(),
-        }
-    }
-}
-
 impl Parseable for Factor {
     fn parse(c: &ParsingContext, token_stream: &mut TokenStream) -> Result<Self, ParseError> {
         let mut left = Factor::Term(Box::new(token_stream.parse_one::<Term>(c)?)); // Use parse_one
         token_stream.stack_entry_mut().ambiguous = false; // Mark as unambiguous
-
-        
 
         while token_stream.peek_as::<Add>().is_ok() || token_stream.peek_as::<Subtract>().is_ok() {
             if token_stream.peek_as::<Add>().is_ok() {
@@ -128,15 +114,14 @@ mod tests {
 
     use super::Expr;
 
+    // #[test]
+    // fn expr_evaluate_test() {
+    //     let mut symbols = DefaultStringInterner::new();
+    //     let binding = lexer(CharStream::new("1 + (6 * 2 - 4 + 100) / 3"), &mut symbols).unwrap();
+    //     let mut chars = TokenStream::new(&binding, symbols);
 
-    #[test]
-    fn expr_evaluate_test() {
-        let mut symbols = DefaultStringInterner::new();
-        let binding = lexer(CharStream::new("1 + (6 * 2 - 4 + 100) / 3"), &mut symbols).unwrap();
-        let mut chars = TokenStream::new(&binding, symbols);
+    //     let expr = chars.parse_one::<Expr>(&super::ParsingContext {}).unwrap();
 
-        let expr = chars.parse_one::<Expr>(&super::ParsingContext {}).unwrap();
-
-        assert_eq!(expr.evaluate(), 37); 
-    }
+    //     assert_eq!(expr.evaluate(), 37);
+    // }
 }

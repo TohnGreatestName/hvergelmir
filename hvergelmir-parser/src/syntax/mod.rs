@@ -1,5 +1,5 @@
 pub mod ast;
-use std::convert::identity;
+use std::{any::type_name, convert::identity};
 
 use enum_downcast::IntoVariant;
 use snafu::{whatever, ResultExt, Snafu, Whatever};
@@ -7,13 +7,30 @@ use stream::{TokenStream, TokenStreamError};
 
 use crate::lexer::{keyword::Keyword, token_types::TokenValue, Token};
 
-mod stream;
+pub mod stream;
+
 
 /// The overall context passed down the parser, immutably.
 pub struct ParsingContext {}
 
+
 #[derive(Debug, Snafu, Clone)]
-pub enum ParseError {
+pub struct ParseError {
+    ty: ParseErrorType,
+    while_parsing: String
+}
+impl ParseError {
+    pub fn new<T>(ty: ParseErrorType) -> Self {
+        Self {
+            ty,
+            while_parsing: type_name::<T>().to_string()
+        }
+    }
+}
+
+
+#[derive(Debug, Snafu, Clone)]
+pub enum ParseErrorType {
     
     TokenStreamError {
         #[snafu(source)]
@@ -30,15 +47,21 @@ impl TryInto<TokenStreamError> for ParseError {
     type Error = Self;
 
     fn try_into(self) -> Result<TokenStreamError, Self> {
-        match self {
-            ParseError::TokenStreamError { source } => Ok(source),
-            s => Err(s),
+        match self.ty {
+            ParseErrorType::TokenStreamError { source } => Ok(source),
+            s => Err(Self {
+                while_parsing: self.while_parsing,
+                ty: s
+            }),
         }
     }
 }
 impl From<TokenStreamError> for ParseError {
     fn from(value: TokenStreamError) -> Self {
-        Self::TokenStreamError { source: value }
+        Self {
+            ty: ParseErrorType::TokenStreamError { source: value },
+            while_parsing: String::new()
+        }
     }
 }
 pub trait Parseable: Sized {

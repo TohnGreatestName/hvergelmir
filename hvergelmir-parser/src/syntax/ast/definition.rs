@@ -1,6 +1,7 @@
 use crate::{lexer::{keyword::Keyword, token_types::{Arrow, Colon, Identifier, LeftCurlyBracket, LeftParenthesis, RightCurlyBracket, RightParenthesis}, Token}, syntax::{stream::{self, TokenStream}, Parseable, ParsingContext}};
 
 use super::statement::Statement;
+use enum_downcast::EnumDowncast;
 use stream::ResultExt;
 
 #[derive(Debug)]
@@ -17,7 +18,7 @@ impl Parseable for File {
         Ok(File { definitions })
     }
 }
-#[derive(Debug)]
+#[derive(Debug, EnumDowncast)]
 pub enum Definition {
     FunctionDefinition(FunctionDefinition)
 }
@@ -93,13 +94,7 @@ pub struct FunctionDefinition {
 }
 impl Parseable for FunctionDefinition {
     fn parse(c: &ParsingContext, token_stream: &mut TokenStream) -> Result<Self, crate::syntax::ParseError> {
-        let func_token = token_stream.next_as::<Keyword>()?;
-        if *func_token.value_ref() != Keyword::Function {
-            return Err(crate::syntax::ParseError::WrongKeyword {
-                expected: Keyword::Function,
-                found: *func_token.value_ref(),
-            });
-        }
+        let func_token = token_stream.next_as::<Keyword>()?.map(|v| v.require(Keyword::Function))?;
         token_stream.stack_entry_mut().ambiguous = false;
         let name = token_stream.next_as::<Identifier>()?;
         let left_parenthesis = token_stream.next_as::<LeftParenthesis>()?;
@@ -144,13 +139,17 @@ mod tests {
         let lexed = lexer(CharStream::new(r"
         
         func epic() {
-            let x = 5
+            let x = 2
+            return x + 7
         }
         
         "), &mut symbols).unwrap();
         let mut ts = TokenStream::new(&lexed, symbols);
 
         let mut file = ts.parse_one::<File>(&ParsingContext {}).unwrap();
+
+
+
         panic!("{:#?}", file);
 
     }
