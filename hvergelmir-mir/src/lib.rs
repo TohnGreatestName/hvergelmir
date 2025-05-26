@@ -28,6 +28,7 @@ mod tests {
 
         let mut file = ts.parse_one::<File>(&ParsingContext {}).unwrap();
         use enum_downcast::EnumDowncast;
+        println!("FILE: {:#?}", file);
         let b = BlockBuilderContext::default().make_blocks(file.definitions.remove(0).enum_downcast::<FunctionDefinition>().unwrap().block);
 
         

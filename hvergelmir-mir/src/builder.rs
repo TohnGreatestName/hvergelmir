@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use hvergelmir_parser::{lexer::token_types::Number, syntax::ast::{
     definition::Block,
@@ -11,162 +11,220 @@ use crate::{
     block::{
         BasicBlock, BasicBlockRef, BlockSequence, BlockSuccessor, Instruction, Literal, RValue,
     },
-    variables::Variable,
+    variables::MIRVariable,
 };
 
 #[derive(Default)]
 pub struct BlockBuilderContext {
-    variables: HashMap<SymbolU32, Variable>,
     seq: BlockSequence,
+    variable_stack: Vec<HashMap<SymbolU32, MIRVariable>>
 }
 
 impl BlockBuilderContext {
-    /// FIXME: declare new variables
-    fn var(&mut self, s: SymbolU32) -> Variable {
-        if let Some(v) = self.variables.get(&s) {
-            self.seq.variables().get(v.index())
-        } else {
-            let v = self.seq.variables().make();
-            self.variables.insert(s, v);
-            v
-        }
+
+    fn declare_var(&mut self, b: &BasicBlockRef, s: SymbolU32) -> MIRVariable {
+        let v = self.seq.variables().make();
+        self.variable_stack.last_mut().unwrap().insert(s, v.new_handle(b));
+        v
     }
 
-    fn put_var(&mut self, s: SymbolU32, variable: Variable) {
-        self.variables.insert(s, variable);
+    /// FIXME: A stack structure to keep track of scope.
+    fn var(&mut self, b: &BasicBlockRef, s: SymbolU32, increment: bool) -> MIRVariable {
+        for mapping in self.variable_stack.iter_mut().rev() {
+            if let Some(var) = mapping.get_mut(&s) {
+                return if increment {
+                    var.write(b)
+                } else {
+                    var.read(b)
+                }
+            }
+        }
+        panic!("var not found")
+        
+        // let mut scan_list = vec![blk.clone()];
+        // let mut searched = HashSet::new();
+        // println!("Search: {s:?}");
+
+        // let mut outputs = HashMap::new();
+        // while !scan_list.is_empty() {
+        //     let v = scan_list.pop().unwrap();
+        //     let mut blk_inner = v.borrow_mut();
+        //     println!("Vars: {:?}", blk_inner.variables());
+        //     if let Some(v) = blk_inner.variables().get(&s) {
+        //         outputs.insert(blk_inner.index(), *v);
+        //     } else {
+        //         for p in blk_inner.predecessors() {
+        //             if searched.insert(*p) {
+        //                 scan_list.push(self.seq.block(*p).unwrap());
+        //             }
+        //         }
+
+        //     }
+        // }
+
+        // if outputs.is_empty() {
+        //     panic!("Couldn't find var")            
+        // } else if outputs.len() == 1 {
+        //     return outputs.into_iter().next().unwrap().1;
+        // } else {
+        //     let new_var = self.declare_var(blk.clone(), s);
+        //     let mut blk_mut = blk.borrow_mut();
+        //     let phi = blk_mut.phi_mut().entry(s).or_default();
+
+        //     for (index, var) in outputs {
+        //         phi.insert(index, var);
+        //     }
+        //     return new_var;
+        // }
+
+    }
+
+    fn put_var(&mut self, blk: BasicBlockRef, s: SymbolU32, variable: MIRVariable) {
+        self.variable_stack.last_mut().unwrap().insert(s, variable);
     }
 
     pub fn make_blocks(mut self, input: Block) -> BlockSequence {
-        self.eval_block(&input);
+        let mut b = self.seq.add_block();
+        self.eval_block(&mut b, &input);
         self.seq
     }
 
-    fn eval_block(&mut self, input: &Block) -> (BasicBlockRef, BasicBlockRef) {
-        let mut b = self.seq.add_block();
+    fn eval_block(&mut self, b: &mut BasicBlockRef, input: &Block) -> BasicBlockRef {
+        self.variable_stack.push(Default::default());
         let start = b.clone();
         for stmt in &input.statements {
-            self.eval_stmt(&mut b, &stmt);
+            self.eval_stmt(b, &stmt);
         }
-        (start, b)
+        self.variable_stack.pop();
+        start
     }
 
     fn eval_stmt(&mut self, b: &mut BasicBlockRef, stmt: &Statement) {
         match stmt {
             Statement::VariableDeclaration(d) => {
-                let e = self.eval_expr(b, &d.value);
-                if let RValue::Variable(v) = e {
-                    self.put_var(d.name.value_ref().symbol, v);
-                } else {
-                    let v = self.var(d.name.value_ref().symbol);
-                    b.borrow_mut().inst(Instruction::Assign(v, e));
-                };
+                let mut v = self.declare_var(b, d.name.value_ref().symbol);
+                let _ = self.eval_expr(&mut Some(v), b, &d.value);
             }
             Statement::Return(r) => {
-                let e = self.eval_expr(b, &r.value);
-                b.borrow_mut().set_successor(BlockSuccessor::Return(e));
+                let mut var = None;
+                let e = self.eval_expr(&mut var, b, &r.value);
+                b.borrow_mut().rtrn(e);
             }
             Statement::Assignment(a) => {
-                let e = self.eval_expr(b, &a.value);
-                if let RValue::Variable(v) = e {
-                    self.put_var(a.name.value_ref().symbol, v);
-                } else {
-                    let v = self.var(a.name.value_ref().symbol);
-                    b.borrow_mut()
-                        .inst(Instruction::Assign(self.seq.variables().get(v.index()), e));
+                let start = self.var(b, a.name.value_ref().symbol, false);
+                let e = self.eval_expr(&mut Some(start.new_handle(b)), b, &a.value);
+
+                if start.is_latest(b) {
+                    let write = start.write(b);
+                    b.borrow_mut().inst(Instruction::Assign(write, e));
                 }
+                
             }
             Statement::StandaloneExpression(expr) => {
-                self.eval_expr(b, &expr);
+                self.eval_expr(&mut None, b, &expr);
             }
         }
     }
 
-    fn eval_term(&mut self, block: &mut BasicBlockRef, term: &Term) -> RValue {
+    // FIXME: assignments to existing variables should not be making new variables
+    fn eval_term(&mut self, target: &mut Option<MIRVariable>, block: &mut BasicBlockRef, term: &Term) -> RValue {
         match term {
-            Term::Parenthesised(v) => self.eval_expr(block, v),
+            Term::Parenthesised(v) => self.eval_expr(target, block, v),
             Term::Ident(a) => RValue::Variable(
-                *self
-                    .variables
-                    .get(&a.value_ref().symbol)
-                    .expect("FATAL: missing variable declaration"),
+                self.var(block, a.value_ref().symbol, false)
             ),
-            Term::Number(n) => RValue::Literal(Literal::Number(n.clone().value())),
+            Term::Number(n) => {
+                let val = RValue::Literal(Literal::Number(n.clone().value()));
+                val
+            }
             Term::Div(a, _, b) => {
-                let a = self.eval_term(block, a);
-                let b = self.eval_term(block, b);
-                let v = self.seq.variables().make();
-                block.borrow_mut().inst(Instruction::Divide(v, a, b));
-                RValue::Variable(v)
+                let a = self.eval_term(target, block, a);
+                let b = self.eval_term(target, block, b);
+                let target = target.get_or_insert_with(|| self.seq.variables().make());
+                let write = target.write(block);
+                block.borrow_mut().inst(Instruction::Divide(write, a, b));
+                RValue::Variable(target.new_handle(block))
             }
             Term::Mul(a, _, b) => {
-                let a = self.eval_term(block, a);
-                let b = self.eval_term(block, b);
-                let v = self.seq.variables().make();
-                block.borrow_mut().inst(Instruction::Multiply(v, a, b));
-                RValue::Variable(v)
+                let a = self.eval_term(target, block, a);
+                let b = self.eval_term(target, block, b);
+                let target = target.get_or_insert_with(|| self.seq.variables().make());
+                let write = target.write(block);
+                block.borrow_mut().inst(Instruction::Multiply(write, a, b));
+                RValue::Variable(target.new_handle(block))
             }
         }
     }
-    fn eval_factor(&mut self, block: &mut BasicBlockRef, fac: &Factor) -> RValue {
+    fn eval_factor(&mut self, target: &mut Option<MIRVariable>, block: &mut BasicBlockRef, fac: &Factor) -> RValue {
         match fac {
-            Factor::Term(t) => self.eval_term(block, t),
+            Factor::Term(t) => self.eval_term(target, block, t),
             Factor::Add(a, _, b) => {
-                let a = self.eval_factor(block, a);
-                let b = self.eval_term(block, b);
-                let v = self.seq.variables().make();
-                block.borrow_mut().inst(Instruction::Add(v, a, b));
-                RValue::Variable(v)
+                let a = self.eval_factor(target, block, a);
+                let b = self.eval_term(target, block, b);
+                let target = target.get_or_insert_with(|| self.seq.variables().make());
+                
+                let write = target.write(block);
+                println!("{a:?} + {b:?} = {write:?} (was {target:?}");
+                block.borrow_mut().inst(Instruction::Add(write, a, b));
+                RValue::Variable(target.new_handle(block))
             }
             Factor::Subtract(a, _, b) => {
-                let a = self.eval_factor(block, a);
-                let b = self.eval_term(block, b);
-                let v = self.seq.variables().make();
-                block.borrow_mut().inst(Instruction::Subtract(v, a, b));
-                RValue::Variable(v)
+                let a = self.eval_factor(target, block, a);
+                let b = self.eval_term(target, block, b);
+                let target = target.get_or_insert_with(|| self.seq.variables().make());
+                let write = target.write(block);
+                block.borrow_mut().inst(Instruction::Subtract(write, a, b));
+                RValue::Variable(target.new_handle(block))
             }
             Factor::LessThan(a, _, b) => {
-                let a = self.eval_factor(block, a);
-                let b = self.eval_term(block, b);
-                let v = self.seq.variables().make();
-                block.borrow_mut().inst(Instruction::LessThan(v, a, b));
-                RValue::Variable(v)
+                let a = self.eval_factor(target, block, a);
+                let b = self.eval_term(target, block, b);
+                let target = target.get_or_insert_with(|| self.seq.variables().make());;
+                let write = target.write(block);
+                block.borrow_mut().inst(Instruction::LessThan(write, a, b));
+                RValue::Variable(target.new_handle(block))
             },
             Factor::GreaterThan(a, _, b) => {
-                let a = self.eval_factor(block, a);
-                let b = self.eval_term(block, b);
-                let v = self.seq.variables().make();
-                block.borrow_mut().inst(Instruction::GreaterThan(v, a, b));
-                RValue::Variable(v)
+                let a = self.eval_factor(target, block, a);
+                let b = self.eval_term(target, block, b);
+                let target = target.get_or_insert_with(|| self.seq.variables().make());
+                let write = target.write(block);
+                block.borrow_mut().inst(Instruction::GreaterThan(write, a, b));
+                RValue::Variable(target.new_handle(block))
             }
         }
     }
-    fn eval_expr(&mut self, b: &mut BasicBlockRef, e: &Expr) -> RValue {
+    fn eval_expr(&mut self, target: &mut Option<MIRVariable>, b: &mut BasicBlockRef, e: &Expr) -> RValue {
         match e {
-            Expr::Factor(fac) => self.eval_factor(b, fac),
+            Expr::Factor(fac) => self.eval_factor(target, b, fac),
             Expr::While(e) => {
                 let mut condition_block = self.seq.add_block();
 
                 // immediately jump to the condition block
-                let cond_start_index = condition_block.borrow().index();
-                b.borrow_mut()
-                    .set_successor(BlockSuccessor::Jump(cond_start_index));
-                let evaluated_condition = self.eval_expr(&mut condition_block, &e.expr);
+                let cond_start = condition_block.clone();
+                {
+                    b.borrow_mut().jump(condition_block.clone());
+                }
+                let evaluated_condition = self.eval_expr(target, &mut condition_block, &e.expr);
 
-                let (target_block, _) = self.eval_block(&e.block);
-
-                target_block
+                let mut target_block = self.seq.add_block();
+                {
+                    target_block
                     .borrow_mut()
-                    .set_successor(BlockSuccessor::Jump(cond_start_index));
+                    .jump(cond_start.clone());
+                }
 
                 let successor_block = self.seq.add_block();
-                condition_block
-                    .borrow_mut()
-                    .set_successor(BlockSuccessor::ConditionalJump(
-                        evaluated_condition,
-                        target_block.borrow().index(),
-                        successor_block.borrow().index(),
-                    ));
-                
+
+                {
+                    condition_block.borrow_mut().cond_jump(evaluated_condition, target_block.clone(), successor_block.clone());
+
+                }
+                self.eval_block(&mut target_block, &e.block);
+
+
+
+    
                 *b = successor_block; // now, we're working in this final successor block.
                     
                     // FIXME: proper evaluation of a value.
