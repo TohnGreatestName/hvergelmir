@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use generational_arena::Index;
 use hvergelmir_parser::{lexer::token_types::Number, syntax::ast::{
     definition::Block,
     expr::{Expr, Factor, Term},
@@ -23,20 +24,16 @@ pub struct BlockBuilderContext {
 impl BlockBuilderContext {
 
     fn declare_var(&mut self, b: &BasicBlockRef, s: SymbolU32) -> MIRVariable {
-        let v = self.seq.variables().make();
-        self.variable_stack.last_mut().unwrap().insert(s, v.new_handle(b));
+        let v = self.seq.variables().make(b);
+        self.variable_stack.last_mut().unwrap().insert(s, v);
         v
     }
 
     /// FIXME: A stack structure to keep track of scope.
-    fn var(&mut self, b: &BasicBlockRef, s: SymbolU32, increment: bool) -> MIRVariable {
-        for mapping in self.variable_stack.iter_mut().rev() {
-            if let Some(var) = mapping.get_mut(&s) {
-                return if increment {
-                    var.write(b)
-                } else {
-                    var.read(b)
-                }
+    fn var(&self, b: &BasicBlockRef, s: SymbolU32) -> MIRVariable {
+        for mapping in self.variable_stack.iter().rev() {
+            if let Some(var) = mapping.get(&s) {
+                return *var
             }
         }
         panic!("var not found")
@@ -83,10 +80,14 @@ impl BlockBuilderContext {
         self.variable_stack.last_mut().unwrap().insert(s, variable);
     }
 
-    pub fn make_blocks(mut self, input: Block) -> BlockSequence {
+    pub fn make_blocks(mut self, input: Block) -> (Index, BlockSequence) {
         let mut b = self.seq.add_block();
+        let idx = {
+            b.borrow().index()
+        };
+        self.seq.set_entry(idx);
         self.eval_block(&mut b, &input);
-        self.seq
+        (idx, self.seq)
     }
 
     fn eval_block(&mut self, b: &mut BasicBlockRef, input: &Block) -> BasicBlockRef {
@@ -111,13 +112,11 @@ impl BlockBuilderContext {
                 b.borrow_mut().rtrn(e);
             }
             Statement::Assignment(a) => {
-                let start = self.var(b, a.name.value_ref().symbol, false);
-                let e = self.eval_expr(&mut Some(start.new_handle(b)), b, &a.value);
+                let start = self.var(b, a.name.value_ref().symbol);
+                let e = self.eval_expr(&mut Some(start), b, &a.value).instance(b);
 
-                if start.is_latest(b) {
-                    let write = start.write(b);
-                    b.borrow_mut().inst(Instruction::Assign(write, e));
-                }
+                let write = start.write(b);
+                b.borrow_mut().inst(Instruction::Assign(write, e)); // FIXME: often unnecessary assignment. Not incorrect though
                 
             }
             Statement::StandaloneExpression(expr) => {
@@ -131,27 +130,27 @@ impl BlockBuilderContext {
         match term {
             Term::Parenthesised(v) => self.eval_expr(target, block, v),
             Term::Ident(a) => RValue::Variable(
-                self.var(block, a.value_ref().symbol, false)
+                self.var(block, a.value_ref().symbol)
             ),
             Term::Number(n) => {
                 let val = RValue::Literal(Literal::Number(n.clone().value()));
                 val
             }
             Term::Div(a, _, b) => {
-                let a = self.eval_term(target, block, a);
-                let b = self.eval_term(target, block, b);
-                let target = target.get_or_insert_with(|| self.seq.variables().make());
+                let a = self.eval_term(target, block, a).instance(block);
+                let b = self.eval_term(target, block, b).instance(block);
+                let target = target.get_or_insert_with(|| self.seq.variables().make(block));
                 let write = target.write(block);
                 block.borrow_mut().inst(Instruction::Divide(write, a, b));
-                RValue::Variable(target.new_handle(block))
+                RValue::Variable(*target)
             }
             Term::Mul(a, _, b) => {
-                let a = self.eval_term(target, block, a);
-                let b = self.eval_term(target, block, b);
-                let target = target.get_or_insert_with(|| self.seq.variables().make());
+                let a = self.eval_term(target, block, a).instance(block);
+                let b = self.eval_term(target, block, b).instance(block);
+                let target = target.get_or_insert_with(|| self.seq.variables().make(block));
                 let write = target.write(block);
                 block.borrow_mut().inst(Instruction::Multiply(write, a, b));
-                RValue::Variable(target.new_handle(block))
+                RValue::Variable(*target)
             }
         }
     }
@@ -159,38 +158,38 @@ impl BlockBuilderContext {
         match fac {
             Factor::Term(t) => self.eval_term(target, block, t),
             Factor::Add(a, _, b) => {
-                let a = self.eval_factor(target, block, a);
-                let b = self.eval_term(target, block, b);
-                let target = target.get_or_insert_with(|| self.seq.variables().make());
+                let a = self.eval_factor(target, block, a).instance(block);
+                let b = self.eval_term(target, block, b).instance(block);
+                let target = target.get_or_insert_with(|| self.seq.variables().make(block));
                 
                 let write = target.write(block);
                 println!("{a:?} + {b:?} = {write:?} (was {target:?}");
                 block.borrow_mut().inst(Instruction::Add(write, a, b));
-                RValue::Variable(target.new_handle(block))
+                RValue::Variable(*target)
             }
             Factor::Subtract(a, _, b) => {
-                let a = self.eval_factor(target, block, a);
-                let b = self.eval_term(target, block, b);
-                let target = target.get_or_insert_with(|| self.seq.variables().make());
+                let a = self.eval_factor(target, block, a).instance(block);
+                let b = self.eval_term(target, block, b).instance(block);
+                let target = target.get_or_insert_with(|| self.seq.variables().make(block));
                 let write = target.write(block);
                 block.borrow_mut().inst(Instruction::Subtract(write, a, b));
-                RValue::Variable(target.new_handle(block))
+                RValue::Variable(*target)
             }
             Factor::LessThan(a, _, b) => {
-                let a = self.eval_factor(target, block, a);
-                let b = self.eval_term(target, block, b);
-                let target = target.get_or_insert_with(|| self.seq.variables().make());;
+                let a = self.eval_factor(target, block, a).instance(block);
+                let b = self.eval_term(target, block, b).instance(block);
+                let target = target.get_or_insert_with(|| self.seq.variables().make(block));;
                 let write = target.write(block);
                 block.borrow_mut().inst(Instruction::LessThan(write, a, b));
-                RValue::Variable(target.new_handle(block))
+                RValue::Variable(*target)
             },
             Factor::GreaterThan(a, _, b) => {
-                let a = self.eval_factor(target, block, a);
-                let b = self.eval_term(target, block, b);
-                let target = target.get_or_insert_with(|| self.seq.variables().make());
+                let a = self.eval_factor(target, block, a).instance(block);
+                let b = self.eval_term(target, block, b).instance(block);
+                let target = target.get_or_insert_with(|| self.seq.variables().make(block));
                 let write = target.write(block);
                 block.borrow_mut().inst(Instruction::GreaterThan(write, a, b));
-                RValue::Variable(target.new_handle(block))
+                RValue::Variable(*target)
             }
         }
     }

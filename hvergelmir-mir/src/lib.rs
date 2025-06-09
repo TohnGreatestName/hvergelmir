@@ -1,6 +1,6 @@
-mod variables;
-mod block;
-mod builder;
+pub mod variables;
+pub mod block;
+pub mod builder;
 
 #[cfg(test)]
 mod tests {
@@ -29,9 +29,13 @@ mod tests {
         let mut file = ts.parse_one::<File>(&ParsingContext {}).unwrap();
         use enum_downcast::EnumDowncast;
         println!("FILE: {:#?}", file);
-        let b = BlockBuilderContext::default().make_blocks(file.definitions.remove(0).enum_downcast::<FunctionDefinition>().unwrap().block);
-
+        let (idx, b) = BlockBuilderContext::default().make_blocks(file.definitions.remove(0).enum_downcast::<FunctionDefinition>().unwrap().block);
+        b.compute_phi_starting_from(idx);
         
+        let block = b.block(idx).unwrap();
+        let next = block.borrow().successors()[0];
+        let block = b.block(next).unwrap();
+        println!("PHI: {:?}", block.borrow().phi());
 
         panic!("{}", b.graphviz());
 

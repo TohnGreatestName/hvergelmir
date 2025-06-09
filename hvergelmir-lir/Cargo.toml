@@ -1,0 +1,10 @@
+[package]
+name = "hvergelmir-lir"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+generational-arena = "0.2.9"
+hvergelmir-x86_64 = { path = "../hvergelmir-x86_64" }
+hvergelmir-mir = { path = "../hvergelmir-mir" }
+hex = "0.4.3"

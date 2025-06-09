@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "bitflags"
+version = "2.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b8e56985ec62d17e9c1001dc89c88ecd7dc08e47eba5ec7c29c7b5eeecde967"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -59,6 +65,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hvergelmir-elf"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+]
+
+[[package]]
+name = "hvergelmir-lir"
+version = "0.1.0"
+dependencies = [
+ "generational-arena",
+ "hex",
+ "hvergelmir-mir",
+ "hvergelmir-x86_64",
+]
+
+[[package]]
 name = "hvergelmir-mir"
 version = "0.1.0"
 dependencies = [
@@ -76,6 +105,14 @@ dependencies = [
  "enum_downcast",
  "snafu",
  "string-interner",
+]
+
+[[package]]
+name = "hvergelmir-x86_64"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hvergelmir-elf",
 ]
 
 [[package]]

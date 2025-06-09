@@ -1,8 +1,8 @@
 use std::{
-    cell::{Ref, RefCell, RefMut}, collections::HashMap, fmt::Debug, hash::{DefaultHasher, Hash, Hasher}, rc::Rc
+    cell::{Ref, RefCell, RefMut}, collections::{HashMap, HashSet, VecDeque}, fmt::Debug, hash::{DefaultHasher, Hash, Hasher}, rc::Rc
 };
 
-use crate::variables::{VariableGeneration, VariableIndex};
+use crate::variables::{ConcreteGeneration, MIRVariableInstance, ResolvedMIRVariable, VariableGeneration, VariableIndex};
 
 use super::variables::{MIRVariable, VariableStore};
 use generational_arena::{Arena, Index};
@@ -15,11 +15,111 @@ pub type BasicBlockRef = Rc<RefCell<BasicBlock>>;
 pub struct BlockSequence {
     blocks: Arena<BasicBlockRef>,
     variables: RefCell<VariableStore>,
+    entry: Option<Index>
 }
 
 impl BlockSequence {
+    pub fn set_entry(&mut self, e: Index) {
+        self.entry = Some(e);
+    }
+
+    pub fn entry(&self) -> Index {
+        self.entry.expect("Caller should only call if entry set")
+    }
+
     pub fn block(&self, i: Index) -> Option<BasicBlockRef> {
         self.blocks.get(i).cloned()
+    }
+
+    pub fn compute_phi_starting_from(&self, idx: Index) {
+        let mut concrete_gen_map: HashMap<VariableIndex, ConcreteGeneration> = HashMap::new();
+
+        let mut new_gen = |v| {
+            *concrete_gen_map.entry(v).and_modify(|v| { v.inc(); }).or_default()
+        };
+
+        let mut phi_compute_stack = VecDeque::new();
+        phi_compute_stack.push_back(idx);
+
+        let mut already_computed = HashSet::new();
+
+
+        // FIRST PASS - compute phi for *declared* variables
+        while !phi_compute_stack.is_empty() {
+            let index = phi_compute_stack.pop_front().unwrap();
+            if already_computed.insert(index) {
+                let blk = self.blocks.get(index).unwrap();
+
+                let mut blk_borrow = blk.borrow_mut();
+
+                for v in blk_borrow.variables_defined().clone() {
+                    // no path. these are already defined.
+                    blk_borrow.phi_table.insert(v, (new_gen(v), vec![]));
+                }
+
+                for v in blk_borrow.successors() {
+                    phi_compute_stack.push_back(v);
+                }
+            }
+        }
+        // go again.
+        phi_compute_stack.push_back(idx);
+        already_computed.clear();
+        while !phi_compute_stack.is_empty() {
+            let index = phi_compute_stack.pop_front().unwrap();
+            if already_computed.insert(index) {
+                let blk = self.blocks.get(index).unwrap();
+
+                let mut blk_borrow = blk.borrow_mut();
+
+                for used in blk_borrow.variable_map().clone() {
+
+                    // for every var used but not defined
+                    if !blk_borrow.variables_defined().contains(&used.0) {
+                        let used_but_not_defined = used;
+
+                        let mut paths = vec![];
+
+                        let mut phi_compute_stack_inner = VecDeque::new();
+                        let mut already_computed_inner = HashSet::new();
+                        already_computed_inner.insert(index);
+                        for v in blk_borrow.predecessors() {
+                            phi_compute_stack_inner.push_back((*v, vec![*v]));
+                        }
+
+                        while !phi_compute_stack_inner.is_empty() {
+                            let (index, path) = phi_compute_stack_inner.pop_front().unwrap();
+                            if already_computed_inner.insert(index) {
+                            
+                                let blk = self.blocks.get(index).unwrap();
+                                let blk_borrow = blk.borrow();
+
+                                let phi = blk_borrow.resolve_var(used_but_not_defined.0);
+                                if let Some(phi) = phi {
+                                    paths.push((path, phi.generation()));
+                                } else {
+                                    for v in blk_borrow.predecessors() {
+                                        let mut new_path = path.clone();
+                                        new_path.push(*v);
+                                        phi_compute_stack_inner.push_back((*v, new_path));
+                                    }
+                                }
+
+                            }
+                        }
+
+                        blk_borrow.phi_table.insert(used_but_not_defined.0, (new_gen(used_but_not_defined.0), paths));
+
+    
+                        
+                    }
+                }
+
+                for v in blk_borrow.successors() {
+                    phi_compute_stack.push_back(v);
+                }
+            }
+        }
     }
 
     pub fn add_block<'a, 'b>(&'a mut self) -> BasicBlockRef {
@@ -47,10 +147,37 @@ pub struct BasicBlock {
     instructions: Vec<Instruction>,
     predecessors: Vec<Index>,
     successor: Option<BlockSuccessor>,
-    variable_map: HashMap<VariableIndex, VariableGeneration>
+    variable_map: HashMap<VariableIndex, VariableGeneration>,
+    variables_defined: HashSet<VariableIndex>,
+    /// A map of variable indices to preceding control 
+    /// flow paths and the base offset at this point.
+    phi_table: HashMap<VariableIndex, (ConcreteGeneration, Vec<(Vec<Index>, ConcreteGeneration)>)>
 }
 
 impl BasicBlock {
+    pub fn phi(&self) -> &HashMap<VariableIndex, (ConcreteGeneration, Vec<(Vec<Index>, ConcreteGeneration)>)> {
+        &self.phi_table
+    }
+
+    // FIXME: shouldn't be heap-allocated. lazy
+    pub fn successors(&self) -> Vec<Index> {
+        match &self.successor {
+            None => vec![],
+            Some(val) => match val {
+                BlockSuccessor::Return(_) => vec![],
+                BlockSuccessor::Jump(j) => vec![*j],
+                BlockSuccessor::ConditionalJump(_, b, c) => vec![*b, *c]
+            }
+        }
+    }
+
+    pub fn resolve_var(&self, i: VariableIndex) -> Option<ResolvedMIRVariable> {
+        if let Some(v) = self.phi_table.get(&i) {
+            Some(ResolvedMIRVariable::new(i, v.0))
+        } else {
+            None
+        }
+    }
 
     pub fn variable_map(&self) -> &HashMap<VariableIndex, VariableGeneration> {
         &self.variable_map
@@ -58,6 +185,14 @@ impl BasicBlock {
 
     pub fn variable_map_mut(&mut self) -> &mut HashMap<VariableIndex, VariableGeneration> {
         &mut self.variable_map
+    }
+
+    pub fn variables_defined(&self) -> &HashSet<VariableIndex> {
+        &self.variables_defined
+    }
+
+    pub fn variables_defined_mut(&mut self) -> &mut HashSet<VariableIndex> {
+        &mut self.variables_defined
     }
 
     fn set_successor(&mut self, s: BlockSuccessor) {
@@ -104,7 +239,9 @@ impl BasicBlock {
             instructions: vec![],
             successor: None,
             predecessors: vec![],
-            variable_map: Default::default()
+            variable_map: Default::default(),
+            phi_table: Default::default(),
+            variables_defined: Default::default()
         }
     }
 
@@ -117,28 +254,34 @@ pub enum Literal {
     Number(Number),
 }
 
+pub enum RValueInstance {
+    Variable(MIRVariableInstance),
+    Literal(Literal),
+}
+
 pub enum RValue {
     Variable(MIRVariable),
     Literal(Literal),
 }
 
 impl RValue {
-    pub fn read(&self, block: &BasicBlockRef) -> Self {
+    pub fn instance(&self, blk: &BasicBlockRef) -> RValueInstance {
         match self {
-            Self::Literal(v) => Self::Literal(*v),
-            Self::Variable(v) => Self::Variable(v.read(block))
+            Self::Literal(l) => RValueInstance::Literal(*l),
+            Self::Variable(v) => RValueInstance::Variable(v.read(blk))
         }
     }
 }
 
+
 pub enum Instruction {
-    Add(MIRVariable, RValue, RValue),
-    Subtract(MIRVariable, RValue, RValue),
-    Divide(MIRVariable, RValue, RValue),
-    Multiply(MIRVariable, RValue, RValue),
-    Assign(MIRVariable, RValue),
-    LessThan(MIRVariable, RValue, RValue),
-    GreaterThan(MIRVariable, RValue, RValue),
+    Add(MIRVariableInstance, RValueInstance, RValueInstance),
+    Subtract(MIRVariableInstance, RValueInstance, RValueInstance),
+    Divide(MIRVariableInstance, RValueInstance, RValueInstance),
+    Multiply(MIRVariableInstance, RValueInstance, RValueInstance),
+    Assign(MIRVariableInstance, RValueInstance),
+    LessThan(MIRVariableInstance, RValueInstance, RValueInstance),
+    GreaterThan(MIRVariableInstance, RValueInstance, RValueInstance),
     Return(RValue),
 }
 
@@ -151,6 +294,15 @@ impl Debug for Literal {
 }
 
 impl Debug for RValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Variable(arg0) => write!(f, "{:?}", arg0),
+            Self::Literal(arg0) => write!(f, "{:?}", arg0),
+        }
+    }
+}
+
+impl Debug for RValueInstance {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Variable(arg0) => write!(f, "{:?}", arg0),
@@ -227,7 +379,7 @@ impl Debug for BlockSequence {
 impl BlockSequence {
     pub fn graphviz(&self) -> String {
         let mut s = String::new();
-
+        s.push_str("digraph G {");
         for (index, block) in self.blocks.iter() {
             let x = block_idx_str(index);
             s.push_str(&format!("B{x} [ label = \"block {x}:\\l"));
@@ -269,6 +421,7 @@ impl BlockSequence {
             s.push_str("\"];");
             s.push_str(&add_commands);
         }
+        s.push_str("}");
         s
     }
 }
