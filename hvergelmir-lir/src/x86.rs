@@ -30,9 +30,7 @@ pub fn translate(v: LIRFunction) -> Vec<u8> {
             }
             Instruction::Return(val) => {
                 let src = translate_value(val);
-                if src != MemOrReg::register(EAX) {
-                    asm.mov_reg(MemOrReg::register(EAX), src);   
-                }
+                asm.mov_reg(MemOrReg::register(EAX), src);  
                 asm.ret();
             }
             _ => todo!()

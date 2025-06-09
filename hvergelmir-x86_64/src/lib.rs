@@ -265,6 +265,9 @@ impl X86Assembler {
     }
 
     pub fn mov_reg(&mut self, dst: MemOrReg, src: MemOrReg) {
+        if src == dst { // no-op
+            return;
+        }
         self.binary_op_32or64(0x89, 0x8B, dst, src);
     }
 
