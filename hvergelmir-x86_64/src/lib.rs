@@ -73,6 +73,8 @@ pub const ESP: Register = Register::new(RegisterTypes::ESP, RegisterMode::Mode32
 pub const RAX: Register = Register::new(RegisterTypes::EAX, RegisterMode::Mode64);
 pub const RBX: Register = Register::new(RegisterTypes::EBX, RegisterMode::Mode64);
 pub const RDX: Register = Register::new(RegisterTypes::EDX, RegisterMode::Mode64);
+pub const RBP: Register = Register::new(RegisterTypes::EBP, RegisterMode::Mode64);
+
 
 pub const RDI: Register = Register::new(RegisterTypes::EDI, RegisterMode::Mode64);
 pub const RSI: Register = Register::new(RegisterTypes::ESI, RegisterMode::Mode64);
@@ -293,9 +295,15 @@ impl X86Assembler {
 
 
     pub fn mov_imm32(&mut self, dst: MemOrReg, val: u32) {
-        if dst.has_reg() {
-            assert_eq!(dst.reg().mode, RegisterMode::Mode32);
+        let mut rex = RexPrefix::default();
+
+        rex.rex_w = dst.reg().mode.is_64();
+        rex.rex_r = dst.reg().ty.is_gpr();
+
+        if rex.any_set() {
+            self.emit(&[rex.value()]);
         }
+
         self.emit(&[0xC7]); // MOV opcode
         dst.emit_modrm(self, 0);
 
@@ -392,6 +400,18 @@ impl X86Assembler {
         self.emit(&offset.to_le_bytes());
     }
 
+    pub fn push(&mut self, dst: MemOrReg) {
+        self.emit(&[0xFF]);
+        dst.emit_modrm(self, 6);
+    }
+
+
+    pub fn pop(&mut self, dst: MemOrReg) {
+        self.emit(&[0x8f]);
+        dst.emit_modrm(self, 0);
+    }
+
+
     pub fn near_call(&mut self, dst: MemOrReg) {
         if dst.reg().ty.is_gpr() {
             self.emit(&[rex_prefix(false, false, false, true)]);
@@ -420,25 +440,36 @@ impl X86Assembler {
 mod tests {
     use hvergelmir_elf::section::Symbol;
 
-    use crate::{MemOrReg, X86Assembler, EAX, EBP, EBX, EDI, EDX, ESI, ESP};
+    use crate::{MemOrReg, X86Assembler, EAX, EBP, EBX, EDI, EDX, ESI, ESP, RAX, RBP, RDI, RDX, RSI, RSP};
     #[test]
     fn simple_emit_test() {
         let mut asm = X86Assembler::new();
+        asm.push(MemOrReg::register(RBP));
+        asm.mov_reg(MemOrReg::register(RBP), MemOrReg::register(RSP));
 
-        asm.mov_imm32(MemOrReg::register(EAX), 4);
-        asm.mov_reg(MemOrReg::register(EBP), MemOrReg::register(ESP));
-        asm.sub_reg(MemOrReg::register(EBP), MemOrReg::register(EAX));
+        let hello_world = c"hello world\n".to_bytes();
+
         asm.mov_imm32(
-            MemOrReg::displaced(EBP, crate::Displacement::Disp32(-4)),
-            u32::from_le_bytes([0x20, 0x20, 0x20, 0]),
+            MemOrReg::displaced(RBP, crate::Displacement::Disp8(-12)),
+            u32::from_le_bytes(hello_world[0..4].try_into().unwrap()),
+        );
+        asm.mov_imm32(
+            MemOrReg::displaced(RBP, crate::Displacement::Disp8(-8)),
+            u32::from_le_bytes(hello_world[4..8].try_into().unwrap()),
+        );
+        asm.mov_imm32(
+            MemOrReg::displaced(RBP, crate::Displacement::Disp8(-4)),
+            u32::from_le_bytes(hello_world[8..12].try_into().unwrap()),
         );
 
-        asm.mov_imm32(MemOrReg::register(EAX), 1);
-        asm.mov_imm32(MemOrReg::register(EDI), 1);
-        asm.lea(ESI, MemOrReg::displaced(EBP, crate::Displacement::Disp32(-4)));
-        asm.mov_imm32(MemOrReg::register(EDX), 4);
+        asm.mov_imm32(MemOrReg::register(RAX), 1); // write syscall
+        asm.mov_imm32(MemOrReg::register(RDI), 1); // to stdout
+        asm.lea(RSI, MemOrReg::displaced(RBP, crate::Displacement::Disp32(-12)));
+        asm.mov_imm32(MemOrReg::register(RDX), 12); // twelve bytes
 
         asm.syscall();
+        asm.pop(MemOrReg::register(RBP)); // restore stack
+        asm.ret();
         
         let mut v = asm.finish();
         let mut symbols = hvergelmir_elf::section::SymbolTableSection::default();
