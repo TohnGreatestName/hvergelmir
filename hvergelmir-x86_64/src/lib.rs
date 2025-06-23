@@ -292,9 +292,7 @@ impl X86Assembler {
         self.emit(&[0xf3, 0x0f, 0x1e, 0xfa]);
     }
 
-
-
-    pub fn mov_imm32(&mut self, dst: MemOrReg, val: u32) {
+    pub fn mov_inner(&mut self, dst: MemOrReg, val: u32) -> usize {
         let mut rex = RexPrefix::default();
 
         rex.rex_w = dst.reg().mode.is_64();
@@ -306,8 +304,16 @@ impl X86Assembler {
 
         self.emit(&[0xC7]); // MOV opcode
         dst.emit_modrm(self, 0);
-
+        let idx = self.writer.len();
         self.emit(&val.to_le_bytes()); // immediate
+        idx
+    }
+    pub fn mov_relocation(&mut self, dst: MemOrReg) -> usize {
+        self.mov_inner(dst, 0x00000000)
+    }
+
+    pub fn mov_imm32(&mut self, dst: MemOrReg, val: u32) {
+        self.mov_inner(dst, val);
     }
 
     pub fn unary_op_32or64(&mut self, opcode: u8, extended_opcode: u8, val: MemOrReg) {
@@ -438,40 +444,41 @@ impl X86Assembler {
 
 #[cfg(test)]
 mod tests {
-    use hvergelmir_elf::section::Symbol;
+    use hvergelmir_elf::section::{DataSection, Elf64AddendRelocation, Elf64RelocationTypes_x86_64, RelocationSection, Symbol};
 
     use crate::{MemOrReg, X86Assembler, EAX, EBP, EBX, EDI, EDX, ESI, ESP, RAX, RBP, RDI, RDX, RSI, RSP};
     #[test]
     fn simple_emit_test() {
         let mut asm = X86Assembler::new();
-        asm.push(MemOrReg::register(RBP));
-        asm.mov_reg(MemOrReg::register(RBP), MemOrReg::register(RSP));
+        // asm.push(MemOrReg::register(RBP));
+        // asm.mov_reg(MemOrReg::register(RBP), MemOrReg::register(RSP));
 
-        let hello_world = c"hello world\n".to_bytes();
+        // let hello_world = c"hello world\n".to_bytes();
 
-        asm.mov_imm32(
-            MemOrReg::displaced(RBP, crate::Displacement::Disp8(-12)),
-            u32::from_le_bytes(hello_world[0..4].try_into().unwrap()),
-        );
-        asm.mov_imm32(
-            MemOrReg::displaced(RBP, crate::Displacement::Disp8(-8)),
-            u32::from_le_bytes(hello_world[4..8].try_into().unwrap()),
-        );
-        asm.mov_imm32(
-            MemOrReg::displaced(RBP, crate::Displacement::Disp8(-4)),
-            u32::from_le_bytes(hello_world[8..12].try_into().unwrap()),
-        );
+        // asm.mov_imm32(
+        //     MemOrReg::displaced(RBP, crate::Displacement::Disp8(-12)),
+        //     u32::from_le_bytes(hello_world[0..4].try_into().unwrap()),
+        // );
+        // asm.mov_imm32(
+        //     MemOrReg::displaced(RBP, crate::Displacement::Disp8(-8)),
+        //     u32::from_le_bytes(hello_world[4..8].try_into().unwrap()),
+        // );
+        // asm.mov_imm32(
+        //     MemOrReg::displaced(RBP, crate::Displacement::Disp8(-4)),
+        //     u32::from_le_bytes(hello_world[8..12].try_into().unwrap()),
+        // );
 
         asm.mov_imm32(MemOrReg::register(RAX), 1); // write syscall
         asm.mov_imm32(MemOrReg::register(RDI), 1); // to stdout
-        asm.lea(RSI, MemOrReg::displaced(RBP, crate::Displacement::Disp32(-12)));
-        asm.mov_imm32(MemOrReg::register(RDX), 12); // twelve bytes
+        let wr_idx = asm.mov_relocation(MemOrReg::register(RSI)); // thing
+        asm.mov_imm32(MemOrReg::register(RDX), 17); // seventeen bytes
 
         asm.syscall();
         asm.pop(MemOrReg::register(RBP)); // restore stack
         asm.ret();
         
         let mut v = asm.finish();
+
         let mut symbols = hvergelmir_elf::section::SymbolTableSection::default();
 
         symbols.add_local(c"fileout.o", Symbol {
@@ -483,6 +490,16 @@ mod tests {
             size: 0,
         });
     
+        symbols.add_local(c"strthing", Symbol {
+            ty: hvergelmir_elf::section::SymbolType::Object,
+            binding: hvergelmir_elf::section::SymbolBinding::Local,
+            visibility: hvergelmir_elf::section::SymbolVisibility::Default,
+            section: 5,
+            offset: 0,
+            size: 5,
+        });
+    
+
         // symbols.add_local(c".text", Symbol {
         //     ty: elf::section::SymbolType::Section,
         //     binding: elf::section::SymbolBinding::Local,
@@ -502,6 +519,16 @@ mod tests {
             size: v.len() as u64,
         });
     
+        symbols.entries.insert(c"test".to_owned(), Symbol {
+            ty: hvergelmir_elf::section::SymbolType::Object,
+            binding: hvergelmir_elf::section::SymbolBinding::Global,
+            visibility: hvergelmir_elf::section::SymbolVisibility::Default,
+            section: 3,
+            offset: 0,
+            size: v.len() as u64,
+        });
+    
+
     
         let mut elf = hvergelmir_elf::ELFHeader {
             abi: hvergelmir_elf::ABI::SystemV,
@@ -513,6 +540,21 @@ mod tests {
             program_data: hvergelmir_elf::section::ProgramDataSection {
                 data: v
             },
+            relocations: RelocationSection {
+                relocation_target: 3,
+                symbol_table: 2,
+                relocations: vec![
+                    Elf64AddendRelocation {
+                        offset: wr_idx as u64,
+                        symbol: 2,
+                        info: Elf64RelocationTypes_x86_64::BasicAddendOffset as u32,
+                        addend: 0
+                    }
+                ]
+            },
+            data: DataSection {
+                data: "HELLO WORLD HAHAH".as_bytes().to_vec()
+            }
         };
     
         let mut out = vec![];

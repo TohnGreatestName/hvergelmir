@@ -1,6 +1,7 @@
 /// An ELF binary emitter. Adapted from an earlier project.
-
 use std::{io::Write, ptr::write_unaligned};
+
+use crate::section::{DataSection, RelocationSection};
 
 use self::section::{
     NullSection, ProgramDataSection, RawSection, StringTableSection, SymbolTableSection,
@@ -45,6 +46,8 @@ pub struct ELFHeader {
     pub strings: StringTableSection,
     pub symbols: SymbolTableSection,
     pub program_data: ProgramDataSection,
+    pub relocations: RelocationSection,
+    pub data: DataSection
 }
 
 impl ELFHeader {
@@ -75,21 +78,21 @@ impl ELFHeader {
 
         output.write_all(&(RawSection::SIZE.unwrap() as u16).to_le_bytes())?; // size of section
 
-        let num_sections: u16 = 4;
+        let num_sections: u16 = 6;
 
         output.write_all(&num_sections.to_le_bytes())?; // number of sections
 
         output.write_all(&1u16.to_le_bytes())?; // string table section index
 
         let program_data = self.program_data.raw(&mut self.strings);
-        let symbol_table = self
-            .symbols
-            .raw((&mut self.strings, 1));
+
+        let symbol_table = self.symbols.raw((&mut self.strings, 1));
 
         let null = NullSection.raw(&mut self.strings);
+        let relocations = self.relocations.raw(&mut self.strings);
+        let data = self.data.raw(&mut self.strings);
 
         let string = self.strings.add_str(c".strtab");
-
 
         let string_table = self.strings.raw(string);
 
@@ -101,6 +104,8 @@ impl ELFHeader {
         string_table.write_to(output, &mut trailing_data, trailing_offset)?;
         symbol_table.write_to(output, &mut trailing_data, trailing_offset)?;
         program_data.write_to(output, &mut trailing_data, trailing_offset)?;
+        relocations.write_to(output, &mut trailing_data, trailing_offset)?;
+        data.write_to(output, &mut trailing_data, trailing_offset)?;
 
         output.write_all(&trailing_data)?;
 
@@ -143,6 +148,7 @@ pub mod section {
 
     use super::Writeable;
 
+
     #[derive(Clone, Copy)]
     #[repr(u32)]
     pub enum SectionType {
@@ -150,7 +156,8 @@ pub mod section {
         ProgramData = 0x1,
         SymbolTable = 0x2,
         StringTable = 0x3,
-        RelocationEntries = 0x9
+        RelocationEntriesWithAddend = 0x4,
+        RelocationEntries = 0x9,
     }
 
     bitflags::bitflags! {
@@ -201,6 +208,79 @@ pub mod section {
             target.write_all(&self.entry_size.to_le_bytes())?;
 
             Ok(())
+        }
+    }
+
+    pub struct DataSection {
+        pub data: Vec<u8>,
+    }
+
+    impl DataSection {
+        pub fn raw(self, sh_strings: &mut StringTableSection) -> RawSection {
+            RawSection {
+                name: sh_strings.add_str(c".data"),
+                ty: SectionType::ProgramData,
+                attributes: SectionFlags::ALLOCATED,
+                virtual_address: 0,
+                data: self.data,
+                sh_link: 0,
+                sh_info: 0,
+                required_alignment: 0,
+                entry_size: 0,
+            }
+        }
+    }
+
+    pub struct RelocationSection {
+        pub relocation_target: u32,
+        pub symbol_table: u32,
+        pub relocations: Vec<Elf64AddendRelocation>,
+    }
+
+    #[repr(u32)]
+    pub enum Elf64RelocationTypes_x86_64 {
+        /// R_X86_64_64 (S + A)
+        BasicAddendOffset = 1,
+    }
+
+    pub struct Elf64AddendRelocation {
+        pub offset: u64,
+        pub symbol: u32,
+        pub info: u32,
+        pub addend: u64,
+    }
+    impl Elf64AddendRelocation {
+        pub fn bytes(&self) -> [u8; 24] {
+            let mut v = [0; 24];
+            v[..8].copy_from_slice(&self.offset.to_le_bytes());
+            v[8..16].copy_from_slice(
+                &(((self.symbol as u64) << 32) + (self.info as u64)).to_le_bytes(),
+            );
+            v[16..].copy_from_slice(&self.addend.to_le_bytes());
+            v
+        }
+    }
+
+    impl RelocationSection {
+        pub fn raw(self, sh_strings: &mut StringTableSection) -> RawSection {
+            let mut data = vec![];
+            for v in &self.relocations {
+                data.extend_from_slice(&v.bytes());
+            }
+            RawSection {
+                // It depends what kind of ELF file you are talking about, and in any case there can be more than one relocation table.
+                // In an ELF 32-bit object file, static code relocations are specified in the rel.text section; for an ELF 64-bit object file, static code relocations are specified in the rela.text section. There may be additional static relocation sections {rel|rela}.??? that specify relocations for objects in the ??? section, e.g. .rela.eh_frame, .rela.init_array.
+                // In an ELF executable or DSO, the .rela.dyn section specifies dynamic relocations for variables. The rela.plt section specifies dynamic relocations for functions.
+                name: sh_strings.add_str(c"rela.text"),
+                ty: SectionType::RelocationEntriesWithAddend,
+                attributes: SectionFlags::empty(),
+                virtual_address: 0,
+                data,
+                sh_link: self.symbol_table,
+                sh_info: self.relocation_target,
+                required_alignment: 16,
+                entry_size: 24,
+            }
         }
     }
 
@@ -264,10 +344,7 @@ pub mod section {
             self.local_entry_order.push(i.to_owned());
         }
 
-        pub fn raw(
-            mut self,
-            strings: (&mut StringTableSection, u32),
-        ) -> RawSection {
+        pub fn raw(mut self, strings: (&mut StringTableSection, u32)) -> RawSection {
             let mut data = vec![];
 
             SymbolTableEntry {
@@ -285,7 +362,12 @@ pub mod section {
             .expect("fail");
 
             let local = self.local_entries.len();
-            for (name, sym) in self.local_entry_order.into_iter().map(|v| (v.clone(), self.local_entries.remove(&v).unwrap())).chain(self.entries.into_iter()) {
+            for (name, sym) in self
+                .local_entry_order
+                .into_iter()
+                .map(|v| (v.clone(), self.local_entries.remove(&v).unwrap()))
+                .chain(self.entries.into_iter())
+            {
                 let name = strings.0.add_str(&name);
                 println!("Index: {}", name);
                 SymbolTableEntry { name, symbol: sym }
@@ -356,7 +438,6 @@ pub mod section {
         }
     }
 
-    
     pub struct StringTableSection {
         data: Vec<u8>,
         indices: HashMap<CString, u32>,
@@ -366,8 +447,8 @@ pub mod section {
         fn default() -> Self {
             Self {
                 data: vec![0],
-                indices: Default::default()
-            }    
+                indices: Default::default(),
+            }
         }
     }
     impl StringTableSection {
