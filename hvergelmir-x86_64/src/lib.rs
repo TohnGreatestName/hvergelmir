@@ -427,6 +427,13 @@ impl X86Assembler {
         dst.emit_modrm(self, 2);
     }
 
+    pub fn near_call_relative(&mut self, dst: i32) -> usize {
+        self.emit(&[0xe8]);
+        let i = self.writer.len();
+        self.emit(&dst.to_le_bytes());
+        i
+    }
+
     /// Near return
     pub fn ret(&mut self) {
         self.emit(&[0xC3]);
@@ -468,13 +475,17 @@ mod tests {
         //     u32::from_le_bytes(hello_world[8..12].try_into().unwrap()),
         // );
 
-        asm.mov_imm32(MemOrReg::register(RAX), 1); // write syscall
-        asm.mov_imm32(MemOrReg::register(RDI), 1); // to stdout
-        let wr_idx = asm.mov_relocation(MemOrReg::register(RSI)); // thing
-        asm.mov_imm32(MemOrReg::register(RDX), 17); // seventeen bytes
+        let wr_idx_str = asm.mov_relocation(MemOrReg::register(RDI));
+        //asm.mov_imm32(MemOrReg::register(RAX), 1); // write syscall
+        // asm.mov_imm32(MemOrReg::register(RDI), 1); // to stdout
 
-        asm.syscall();
-        asm.pop(MemOrReg::register(RBP)); // restore stack
+
+        let wr_idx = asm.near_call_relative(0x000); // thing
+        //let wr_idx = 0;
+        // asm.mov_imm32(MemOrReg::register(RDX), 18); // eighteen bytes
+
+        // asm.syscall();
+        // asm.pop(MemOrReg::register(RBP)); // restore stack
         asm.ret();
         
         let mut v = asm.finish();
@@ -498,7 +509,7 @@ mod tests {
             offset: 0,
             size: 5,
         });
-    
+
 
         // symbols.add_local(c".text", Symbol {
         //     ty: elf::section::SymbolType::Section,
@@ -510,7 +521,7 @@ mod tests {
         // });
     
     
-        symbols.entries.insert(c"main".to_owned(), Symbol {
+        symbols.add(c"main", Symbol {
             ty: hvergelmir_elf::section::SymbolType::Function,
             binding: hvergelmir_elf::section::SymbolBinding::Global,
             visibility: hvergelmir_elf::section::SymbolVisibility::Default,
@@ -519,14 +530,15 @@ mod tests {
             size: v.len() as u64,
         });
     
-        symbols.entries.insert(c"test".to_owned(), Symbol {
-            ty: hvergelmir_elf::section::SymbolType::Object,
+        symbols.add(c"puts", Symbol {
+            ty: hvergelmir_elf::section::SymbolType::NoType,
             binding: hvergelmir_elf::section::SymbolBinding::Global,
             visibility: hvergelmir_elf::section::SymbolVisibility::Default,
-            section: 3,
+            section: 0,
             offset: 0,
-            size: v.len() as u64,
+            size: 0,
         });
+    
     
 
     
@@ -545,21 +557,27 @@ mod tests {
                 symbol_table: 2,
                 relocations: vec![
                     Elf64AddendRelocation {
-                        offset: wr_idx as u64,
+                        offset: wr_idx_str as u64,
                         symbol: 2,
                         info: Elf64RelocationTypes_x86_64::BasicAddendOffset as u32,
                         addend: 0
+                    },
+                    Elf64AddendRelocation {
+                        offset: wr_idx as u64,
+                        symbol: 4,
+                        info: Elf64RelocationTypes_x86_64::LRelativeWat as u32,
+                        addend: -4
                     }
                 ]
             },
             data: DataSection {
-                data: "HELLO WORLD HAHAH".as_bytes().to_vec()
+                data: "HELLO WORLD HAHAH this is a null-terminated string of any length!?!\0".as_bytes().to_vec()
             }
         };
     
         let mut out = vec![];
         elf.write(&mut out).unwrap();
-        std::fs::write("/Users/user/Documents/Programming/rust/hvergelmir/fileout.o", out).unwrap();
+        std::fs::write("/Users/user/Documents/Programming/rust/hvergelmir/local/fileout.o", out).unwrap();
 
 
         // panic!("D: {:?}");

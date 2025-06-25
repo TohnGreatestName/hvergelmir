@@ -165,6 +165,7 @@ pub mod section {
             const STRINGS = 0x20;
             const EXECUTABLE = 0x4;
             const ALLOCATED = 0x2;
+            const INFO_LINK = 0x40;
         }
     }
 
@@ -241,13 +242,17 @@ pub mod section {
     pub enum Elf64RelocationTypes_x86_64 {
         /// R_X86_64_64 (S + A)
         BasicAddendOffset = 1,
+        /// R_X86_64_PC32 (S + A - P)
+        ProgramCounterRelative = 2,
+        /// R_X86_64_PLT32
+        LRelativeWat = 4
     }
 
     pub struct Elf64AddendRelocation {
         pub offset: u64,
         pub symbol: u32,
         pub info: u32,
-        pub addend: u64,
+        pub addend: i64,
     }
     impl Elf64AddendRelocation {
         pub fn bytes(&self) -> [u8; 24] {
@@ -271,9 +276,9 @@ pub mod section {
                 // It depends what kind of ELF file you are talking about, and in any case there can be more than one relocation table.
                 // In an ELF 32-bit object file, static code relocations are specified in the rel.text section; for an ELF 64-bit object file, static code relocations are specified in the rela.text section. There may be additional static relocation sections {rel|rela}.??? that specify relocations for objects in the ??? section, e.g. .rela.eh_frame, .rela.init_array.
                 // In an ELF executable or DSO, the .rela.dyn section specifies dynamic relocations for variables. The rela.plt section specifies dynamic relocations for functions.
-                name: sh_strings.add_str(c"rela.text"),
+                name: sh_strings.add_str(c".rela.text"),
                 ty: SectionType::RelocationEntriesWithAddend,
-                attributes: SectionFlags::empty(),
+                attributes: SectionFlags::INFO_LINK,
                 virtual_address: 0,
                 data,
                 sh_link: self.symbol_table,
@@ -335,14 +340,19 @@ pub mod section {
     #[derive(Default)]
     pub struct SymbolTableSection {
         pub local_entries: HashMap<CString, Symbol>,
-        pub local_entry_order: Vec<CString>,
+        pub entry_order: Vec<CString>,
         pub entries: HashMap<CString, Symbol>,
     }
     impl SymbolTableSection {
         pub fn add_local(&mut self, i: &CStr, sym: Symbol) {
             self.local_entries.insert(i.to_owned(), sym);
-            self.local_entry_order.push(i.to_owned());
+            self.entry_order.push(i.to_owned());
         }
+        pub fn add(&mut self, i: &CStr, sym: Symbol) {
+            self.entry_order.push(i.to_owned());
+            self.entries.insert(i.to_owned(), sym);
+        }
+
 
         pub fn raw(mut self, strings: (&mut StringTableSection, u32)) -> RawSection {
             let mut data = vec![];
@@ -363,10 +373,9 @@ pub mod section {
 
             let local = self.local_entries.len();
             for (name, sym) in self
-                .local_entry_order
+                .entry_order
                 .into_iter()
-                .map(|v| (v.clone(), self.local_entries.remove(&v).unwrap()))
-                .chain(self.entries.into_iter())
+                .map(|v| (v.clone(), self.local_entries.remove(&v).unwrap_or_else(|| self.entries.remove(&v).unwrap())))
             {
                 let name = strings.0.add_str(&name);
                 println!("Index: {}", name);
