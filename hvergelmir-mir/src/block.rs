@@ -248,6 +248,10 @@ impl BasicBlock {
     pub fn inst(&mut self, i: Instruction) {
         self.instructions.push(i);
     }
+
+    pub fn instructions(&self) -> &[Instruction] {
+        &self.instructions
+    }
 }
 #[derive(Clone, Copy)]
 pub enum Literal {

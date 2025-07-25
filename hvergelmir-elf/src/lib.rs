@@ -47,7 +47,7 @@ pub struct ELFHeader {
     pub symbols: SymbolTableSection,
     pub program_data: ProgramDataSection,
     pub relocations: RelocationSection,
-    pub data: DataSection
+    pub data: DataSection,
 }
 
 impl ELFHeader {
@@ -85,11 +85,11 @@ impl ELFHeader {
         output.write_all(&1u16.to_le_bytes())?; // string table section index
 
         let program_data = self.program_data.raw(&mut self.strings);
-
+        let relocations = self.relocations.raw(&mut self.strings, &self.symbols);
         let symbol_table = self.symbols.raw((&mut self.strings, 1));
 
         let null = NullSection.raw(&mut self.strings);
-        let relocations = self.relocations.raw(&mut self.strings);
+
         let data = self.data.raw(&mut self.strings);
 
         let string = self.strings.add_str(c".strtab");
@@ -146,8 +146,9 @@ pub mod section {
         io::Write,
     };
 
-    use super::Writeable;
+    use indexmap::IndexMap;
 
+    use super::Writeable;
 
     #[derive(Clone, Copy)]
     #[repr(u32)]
@@ -233,6 +234,7 @@ pub mod section {
     }
 
     pub struct RelocationSection {
+        // a section!
         pub relocation_target: u32,
         pub symbol_table: u32,
         pub relocations: Vec<Elf64AddendRelocation>,
@@ -244,22 +246,23 @@ pub mod section {
         BasicAddendOffset = 1,
         /// R_X86_64_PC32 (S + A - P)
         ProgramCounterRelative = 2,
-        /// R_X86_64_PLT32
-        LRelativeWat = 4
+        /// R_X86_64_PLT32 (L + A - P)
+        LRelativeWat = 4,
     }
 
     pub struct Elf64AddendRelocation {
         pub offset: u64,
-        pub symbol: u32,
+        pub symbol: SymbolIndex,
         pub info: u32,
         pub addend: i64,
     }
     impl Elf64AddendRelocation {
-        pub fn bytes(&self) -> [u8; 24] {
+        pub fn bytes(&self, symbol_table: &SymbolTableSection) -> [u8; 24] {
             let mut v = [0; 24];
             v[..8].copy_from_slice(&self.offset.to_le_bytes());
             v[8..16].copy_from_slice(
-                &(((self.symbol as u64) << 32) + (self.info as u64)).to_le_bytes(),
+                &(((symbol_table.resolve(self.symbol) as u64) << 32) + (self.info as u64))
+                    .to_le_bytes(),
             );
             v[16..].copy_from_slice(&self.addend.to_le_bytes());
             v
@@ -267,10 +270,14 @@ pub mod section {
     }
 
     impl RelocationSection {
-        pub fn raw(self, sh_strings: &mut StringTableSection) -> RawSection {
+        pub fn raw(
+            self,
+            sh_strings: &mut StringTableSection,
+            sh_symbols: &SymbolTableSection,
+        ) -> RawSection {
             let mut data = vec![];
             for v in &self.relocations {
-                data.extend_from_slice(&v.bytes());
+                data.extend_from_slice(&v.bytes(sh_symbols));
             }
             RawSection {
                 // It depends what kind of ELF file you are talking about, and in any case there can be more than one relocation table.
@@ -337,22 +344,57 @@ pub mod section {
         pub size: u64,
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+    pub enum SymbolIndex {
+        Local(usize),
+        Global(usize),
+    }
+
     #[derive(Default)]
     pub struct SymbolTableSection {
-        pub local_entries: HashMap<CString, Symbol>,
-        pub entry_order: Vec<CString>,
-        pub entries: HashMap<CString, Symbol>,
+        pub local_entries: IndexMap<CString, Symbol>,
+        pub entries: IndexMap<CString, Symbol>,
     }
     impl SymbolTableSection {
-        pub fn add_local(&mut self, i: &CStr, sym: Symbol) {
-            self.local_entries.insert(i.to_owned(), sym);
-            self.entry_order.push(i.to_owned());
-        }
-        pub fn add(&mut self, i: &CStr, sym: Symbol) {
-            self.entry_order.push(i.to_owned());
-            self.entries.insert(i.to_owned(), sym);
+        pub fn get_mut(&mut self, i: &CStr) -> Option<(SymbolIndex, &mut Symbol)> {
+            self.local_entries
+                .get_full_mut(i)
+                .map(|(idx, _, sym)| (SymbolIndex::Local(idx + 1), sym))
+                .or_else(|| {
+                    self.entries
+                        .get_full_mut(i)
+                        .map(|(idx, _, sym)| (SymbolIndex::Global(idx + 1), sym))
+                })
         }
 
+        pub fn get(&self, i: &CStr) -> Option<(SymbolIndex, &Symbol)> {
+            self.local_entries
+                .get_full(i)
+                .map(|(idx, _, sym)| (SymbolIndex::Local(idx + 1), sym))
+                .or_else(|| {
+                    self.entries
+                        .get_full(i)
+                        .map(|(idx, _, sym)| (SymbolIndex::Global(idx + 1), sym))
+                })
+        }
+
+        pub fn add_local(&mut self, i: &CStr, sym: Symbol) -> SymbolIndex {
+            self.local_entries.insert(i.to_owned(), sym);
+            SymbolIndex::Local(self.local_entries.len())
+        }
+        pub fn add(&mut self, i: &CStr, sym: Symbol) -> SymbolIndex {
+            self.entries.insert(i.to_owned(), sym);
+            SymbolIndex::Global(self.entries.len())
+        }
+
+        /// Resolve the symbol index `i` according to the
+        /// current state of this symbol table.
+        pub fn resolve(&self, i: SymbolIndex) -> usize {
+            match i {
+                SymbolIndex::Local(i) => i,
+                SymbolIndex::Global(i) => i + self.local_entries.len(),
+            }
+        }
 
         pub fn raw(mut self, strings: (&mut StringTableSection, u32)) -> RawSection {
             let mut data = vec![];
@@ -373,12 +415,11 @@ pub mod section {
 
             let local = self.local_entries.len();
             for (name, sym) in self
-                .entry_order
+                .local_entries
                 .into_iter()
-                .map(|v| (v.clone(), self.local_entries.remove(&v).unwrap_or_else(|| self.entries.remove(&v).unwrap())))
+                .chain(self.entries.into_iter())
             {
                 let name = strings.0.add_str(&name);
-                println!("Index: {}", name);
                 SymbolTableEntry { name, symbol: sym }
                     .write_to(&mut data, &mut vec![], 0)
                     .expect("fail");

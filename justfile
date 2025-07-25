@@ -1,5 +1,5 @@
 generate-out: 
-    cargo test simple_emit_test
+    cargo test brainfrick_test -- --nocapture
 
 link: generate-out
     x86_64-linux-musl-gcc -static local/fileout.o -o local/a.out
@@ -9,7 +9,7 @@ readelf: generate-out
 
 
 disassemble: link
-    objdump -d local/a.out | less -p "<main>"
+    objdump --x86-asm-syntax=intel -d local/a.out | less -p "<main>"
 
 copy-to-vm: link
-    cp a.out ~/Documents/SecondVMShare/
+    cp local/a.out ~/Documents/SecondVMShare/

@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 bitflags = { version = "2.9.1" }
+indexmap = "2"

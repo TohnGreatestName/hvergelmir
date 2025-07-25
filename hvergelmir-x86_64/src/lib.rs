@@ -1,4 +1,7 @@
+pub use hvergelmir_elf;
 use std::{collections::HashMap, io::Write};
+
+use hvergelmir_elf::section::{Elf64AddendRelocation, Elf64RelocationTypes_x86_64, SymbolIndex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -37,6 +40,7 @@ impl RegisterTypes {
 }
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Copy)]
 pub enum RegisterMode {
+    Mode8,
     Mode32,
     Mode64,
 }
@@ -63,7 +67,6 @@ pub const EBX: Register = Register::new(RegisterTypes::EBX, RegisterMode::Mode32
 pub const ECX: Register = Register::new(RegisterTypes::ECX, RegisterMode::Mode32);
 pub const EBP: Register = Register::new(RegisterTypes::EBP, RegisterMode::Mode32);
 
-
 pub const ESI: Register = Register::new(RegisterTypes::ESI, RegisterMode::Mode32);
 
 pub const EDI: Register = Register::new(RegisterTypes::EDI, RegisterMode::Mode32);
@@ -74,7 +77,6 @@ pub const RAX: Register = Register::new(RegisterTypes::EAX, RegisterMode::Mode64
 pub const RBX: Register = Register::new(RegisterTypes::EBX, RegisterMode::Mode64);
 pub const RDX: Register = Register::new(RegisterTypes::EDX, RegisterMode::Mode64);
 pub const RBP: Register = Register::new(RegisterTypes::EBP, RegisterMode::Mode64);
-
 
 pub const RDI: Register = Register::new(RegisterTypes::EDI, RegisterMode::Mode64);
 pub const RSI: Register = Register::new(RegisterTypes::ESI, RegisterMode::Mode64);
@@ -89,9 +91,28 @@ pub const R13: Register = Register::new(RegisterTypes::R13, RegisterMode::Mode64
 pub const R14: Register = Register::new(RegisterTypes::R14, RegisterMode::Mode64);
 pub const R15: Register = Register::new(RegisterTypes::R15, RegisterMode::Mode64);
 
+pub mod systemv_abi {
+    use crate::MemOrReg;
+
+    #[macro_export]
+    macro_rules! arg {
+        ($idx:expr) => {
+            match $idx {
+                0 => MemOrReg::register(RDI),
+                1 => MemOrReg::register(RSI),
+                2 => MemOrReg::register(RDX),
+                _ => unimplemented!(),
+            }
+        };
+    }
+    pub use arg;
+}
 pub const FIRST_ARG: Register = RDI;
 pub const SECOND_ARG: Register = RSI;
 
+const fn sib(scale: u8, index: u8, base: u8) -> u8 {
+    scale << 6 | index << 3 | base
+}
 const fn modrm(mod_v: u8, reg_or_opcode: u8, rm: u8) -> u8 {
     mod_v << 6 | reg_or_opcode << 3 | rm
 }
@@ -144,6 +165,16 @@ pub struct MemOrReg {
 }
 
 impl MemOrReg {
+    pub fn mode(self, mode: RegisterMode) -> Self {
+        Self {
+            reg: self.reg.map(|mut v| {
+                v.mode = mode;
+                v
+            }),
+            mode: self.mode,
+        }
+    }
+
     pub fn register(r: Register) -> Self {
         Self {
             reg: Some(r),
@@ -161,6 +192,13 @@ impl MemOrReg {
     pub fn displaced(r: Register, displacement: Displacement) -> Self {
         Self {
             reg: Some(r),
+            mode: DestinationMode::MemoryDisplaced(displacement),
+        }
+    }
+
+    pub fn displace(self, displacement: Displacement) -> Self {
+        Self {
+            reg: self.reg,
             mode: DestinationMode::MemoryDisplaced(displacement),
         }
     }
@@ -185,7 +223,8 @@ impl MemOrReg {
                 output.emit(&[modrm(0b11, reg_or_opcode, self.reg().ty.code())])
             }
             DestinationMode::Memory => {
-                output.emit(&[modrm(0b00, reg_or_opcode, self.reg().ty.code())])
+                output.emit(&[modrm(0b00, reg_or_opcode, self.reg().ty.code())]);
+                output.emit(&[sib(0, 4, self.reg().ty.code())]); // Fixme: why sib?
             }
             DestinationMode::MemoryDisplaced(Displacement::Disp8(v)) => {
                 output.emit(&[modrm(0b01, reg_or_opcode, self.reg().ty.code()), v as u8]);
@@ -202,7 +241,7 @@ impl MemOrReg {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Label(pub u64);
 
 impl Label {
@@ -214,7 +253,8 @@ impl Label {
 pub struct X86Assembler {
     writer: Vec<u8>,
     current_label: Label,
-    label_lookup: HashMap<Label, (Option<usize>, Vec<usize>)>,
+    label_lookup: HashMap<Label, (Option<usize>, Vec<(usize, usize)>)>,
+    relocations: Vec<Elf64AddendRelocation>,
 }
 
 impl X86Assembler {
@@ -223,22 +263,25 @@ impl X86Assembler {
             writer: Vec::new(),
             current_label: Label(0),
             label_lookup: HashMap::new(),
+            relocations: Vec::new(),
         }
     }
-    pub fn finish(mut self) -> Vec<u8> {
+    pub fn finish(mut self) -> (Vec<u8>, Vec<Elf64AddendRelocation>) {
         for (_, (target, jumpers)) in self.label_lookup {
             if let Some(target) = target {
-                for jumper in jumpers {
-                    let v = target as i32 - (jumper + 5) as i32;
+                for (jumper, offset) in jumpers {
+                    println!("OFFSET: {:?}", (target as i32) - (jumper as i32));
+                    let v = target as i32 - (jumper) as i32 - (offset as i32 - jumper as i32 + 4);
 
-                    self.writer[jumper + 1..jumper + 5].copy_from_slice(&v.to_le_bytes());
+                    self.writer[offset..offset + (4)].copy_from_slice(&v.to_le_bytes());
                 }
+                // panic!()
             } else {
                 panic!("Null jump target!");
             }
         }
 
-        self.writer
+        (self.writer, self.relocations)
     }
 
     pub fn make_label(&mut self) -> Label {
@@ -247,15 +290,35 @@ impl X86Assembler {
         l
     }
 
-    pub fn hook_label(&mut self, l: Label) {
+    pub fn hook_label(&mut self, l: Label) -> bool {
         let index = self.writer.len();
+        let present = self.label_lookup.get(&l).map(|v| v.0).flatten().is_some(); // fixme: dumb 2 lookups lol
         self.label_lookup.entry(l).or_default().0 = Some(index);
+        present
     }
 
-    pub fn jump_label(&mut self, l: Label) {
-        let start = self.writer.len();
-        self.near_jump_relative(0xDEADBEEFu32 as i32);
-        self.label_lookup.entry(l).or_default().1.push(start);
+    pub fn jump_label(&mut self, f: impl FnOnce(&mut X86Assembler, i32) -> usize, l: Label) {
+        let start = self.data().len();
+        let idx = (f)(self, (0xDEADBEEFu32 as i32));
+        self.label_lookup.entry(l).or_default().1.push((start, idx));
+    }
+
+    pub fn sub_imm32(&mut self, dst: MemOrReg, imm: i32) {
+        self.unary_op_32or64(0x81, 0x80, 5, dst);
+        self.emit(&imm.to_le_bytes());
+    }
+
+    pub fn add_imm32(&mut self, dst: MemOrReg, imm: i32) {
+        self.unary_op_32or64(0x81, 0x80, 0, dst);
+        self.emit(&imm.to_le_bytes());
+    }
+    pub fn add_imm8(&mut self, dst: MemOrReg, imm: i8) {
+        self.unary_op_32or64(0x80, 0x80, 0, dst);
+        self.emit(&imm.to_le_bytes());
+    }
+
+    pub fn data(&self) -> &[u8] {
+        &self.writer
     }
 
     pub fn add_reg(&mut self, dst: MemOrReg, src: MemOrReg) {
@@ -267,18 +330,23 @@ impl X86Assembler {
     }
 
     pub fn mov_reg(&mut self, dst: MemOrReg, src: MemOrReg) {
-        if src == dst { // no-op
+        if src == dst {
+            // no-op
             return;
         }
         self.binary_op_32or64(0x89, 0x8B, dst, src);
     }
 
+    pub fn dec_reg(&mut self, val: MemOrReg) {
+        self.unary_op_32or64(0xFF, 0xff, 1, val);
+    }
+
     pub fn push_reg(&mut self, val: MemOrReg) {
-        self.unary_op_32or64(0xFF, 6, val);
+        self.unary_op_32or64(0xFF, 0xff, 6, val);
     }
 
     pub fn pop_reg(&mut self, dst: MemOrReg) {
-        self.unary_op_32or64(0x8F, 0, dst);
+        self.unary_op_32or64(0x8F, 0x8f, 0, dst);
     }
 
     pub fn lea(&mut self, dst: Register, src: MemOrReg) {
@@ -292,7 +360,7 @@ impl X86Assembler {
         self.emit(&[0xf3, 0x0f, 0x1e, 0xfa]);
     }
 
-    pub fn mov_inner(&mut self, dst: MemOrReg, val: u32) -> usize {
+    pub fn unary_imm32(&mut self, dst: MemOrReg, opcode: u8, val: u32) -> usize {
         let mut rex = RexPrefix::default();
 
         rex.rex_w = dst.reg().mode.is_64();
@@ -302,12 +370,33 @@ impl X86Assembler {
             self.emit(&[rex.value()]);
         }
 
-        self.emit(&[0xC7]); // MOV opcode
+        self.emit(&[opcode]); // MOV opcode
         dst.emit_modrm(self, 0);
         let idx = self.writer.len();
         self.emit(&val.to_le_bytes()); // immediate
         idx
     }
+
+    pub fn mov_inner(&mut self, dst: MemOrReg, val: u32) -> usize {
+        self.unary_imm32(dst, 0xC7, val)
+    }
+    pub fn test_imm32(&mut self, dst: MemOrReg, val: u32) -> usize {
+        self.unary_op_32or64(0xF7, 0xF7, 0, dst);
+        let idx = self.data().len();
+        self.emit(&val.to_le_bytes());
+        idx
+    }
+
+    pub fn mov_symbol_address(&mut self, dst: MemOrReg, src: SymbolIndex) {
+        let write_index = self.mov_relocation(dst);
+        self.relocations.push(Elf64AddendRelocation {
+            offset: write_index as u64,
+            symbol: src,
+            info: Elf64RelocationTypes_x86_64::BasicAddendOffset as u32,
+            addend: 0,
+        });
+    }
+
     pub fn mov_relocation(&mut self, dst: MemOrReg) -> usize {
         self.mov_inner(dst, 0x00000000)
     }
@@ -316,15 +405,28 @@ impl X86Assembler {
         self.mov_inner(dst, val);
     }
 
-    pub fn unary_op_32or64(&mut self, opcode: u8, extended_opcode: u8, val: MemOrReg) {
+    pub fn unary_op_32or64(
+        &mut self,
+        mut opcode: u8,
+        single_byte_opcode: u8,
+        extended_opcode: u8,
+        val: MemOrReg,
+    ) {
         if val.mode.is_memory() {
             // src must be a register
+
+            if val.has_reg() {
+                if val.reg().mode == RegisterMode::Mode8 {
+                    opcode = single_byte_opcode;
+                }
+            }
 
             let mut rex = RexPrefix::default();
 
             if val.has_reg() {
                 rex.rex_w = val.reg().mode.is_64();
-                rex.rex_r = val.reg().ty.is_gpr();
+                //rex.rex_r = val.reg().ty.is_gpr();
+                rex.rex_b = val.reg().ty.is_gpr();
             }
 
             if rex.any_set() {
@@ -339,6 +441,7 @@ impl X86Assembler {
 
             rex.rex_w = val.reg().mode.is_64();
             rex.rex_r = val.reg().ty.is_gpr();
+            rex.rex_b = val.reg().ty.is_gpr();
 
             if rex.any_set() {
                 self.emit(&[rex.value()]);
@@ -350,22 +453,22 @@ impl X86Assembler {
 
     pub fn binary_op_32or64(
         &mut self,
-        dest_memory_opcode: u8,
-        dest_register_opcode: u8,
+        mut dest_memory_opcode: u8,
+        mut dest_register_opcode: u8,
         dst: MemOrReg,
         src: MemOrReg,
     ) {
-        if dst.has_reg() && src.has_reg() {
-            assert_eq!(dst.reg().mode, src.reg().mode);
-        }
+        // if dst.has_reg() && src.has_reg() {
+        //     assert_eq!(dst.reg().mode, src.reg().mode);
+        // }
 
         if dst.mode.is_memory() {
             // src must be a register
             assert_eq!(src.mode, DestinationMode::Register);
 
-            if dst.has_reg() && matches!(dst.reg().mode, RegisterMode::Mode64) {
+            if dst.has_reg()  {
                 self.emit(&[rex_prefix(
-                    true,
+                    matches!(dst.reg().mode, RegisterMode::Mode64),
                     src.reg().ty.is_gpr(),
                     false,
                     dst.reg().ty.is_gpr(),
@@ -378,7 +481,9 @@ impl X86Assembler {
                     false,
                 )]);
             }
-
+            if matches!(dst.reg().mode, RegisterMode::Mode8) {
+                dest_memory_opcode -= 1;
+            }
             self.emit(&[dest_memory_opcode]);
             dst.emit_modrm(self, src.reg().ty.code());
         } else {
@@ -401,22 +506,42 @@ impl X86Assembler {
         }
     }
 
-    pub fn near_jump_relative(&mut self, offset: i32) {
+    pub fn near_jump_relative(&mut self, offset: i32) -> usize {
         self.emit(&[0xE9]);
+        let idx = self.data().len();
         self.emit(&offset.to_le_bytes());
+        idx
     }
 
-    pub fn push(&mut self, dst: MemOrReg) {
-        self.emit(&[0xFF]);
-        dst.emit_modrm(self, 6);
+    pub fn near_jump_relative_if_equal(&mut self, offset: i32) -> usize {
+        self.emit(&[0x0f, 0x84]);
+        let idx = self.data().len();
+        self.emit(&offset.to_le_bytes());
+        idx
     }
 
+    pub fn near_jump_relative_if_nonzero(&mut self, offset: i32) -> usize {
+        self.emit(&[0x0f, 0x85]);
+        let idx = self.data().len();
+        self.emit(&offset.to_le_bytes());
+        idx
+    }
+    pub fn near_jump_relative_if_zero(&mut self, offset: i32) -> usize {
+        self.emit(&[0x0f, 0x84]);
+        let idx = self.data().len();
+        self.emit(&offset.to_le_bytes());
+        idx
+    }
+
+    // pub fn push(&mut self, dst: MemOrReg) {
+    //     self.emit(&[0xFF]);
+    //     dst.emit_modrm(self, 6);
+    // }
 
     pub fn pop(&mut self, dst: MemOrReg) {
         self.emit(&[0x8f]);
         dst.emit_modrm(self, 0);
     }
-
 
     pub fn near_call(&mut self, dst: MemOrReg) {
         if dst.reg().ty.is_gpr() {
@@ -425,6 +550,17 @@ impl X86Assembler {
 
         self.emit(&[0xFF]);
         dst.emit_modrm(self, 2);
+    }
+
+    pub fn near_call_symbol(&mut self, sym: SymbolIndex) {
+        let write_index = self.near_call_relative(0x0000);
+
+        self.relocations.push(Elf64AddendRelocation {
+            offset: write_index as u64,
+            symbol: sym,
+            info: Elf64RelocationTypes_x86_64::LRelativeWat as u32,
+            addend: -4,
+        });
     }
 
     pub fn near_call_relative(&mut self, dst: i32) -> usize {
@@ -451,11 +587,63 @@ impl X86Assembler {
 
 #[cfg(test)]
 mod tests {
-    use hvergelmir_elf::section::{DataSection, Elf64AddendRelocation, Elf64RelocationTypes_x86_64, RelocationSection, Symbol};
+    use hvergelmir_elf::section::{
+        DataSection, Elf64AddendRelocation, Elf64RelocationTypes_x86_64, RelocationSection, Symbol,
+    };
 
-    use crate::{MemOrReg, X86Assembler, EAX, EBP, EBX, EDI, EDX, ESI, ESP, RAX, RBP, RDI, RDX, RSI, RSP};
+    use crate::{
+        EAX, EBP, EBX, EDI, EDX, ESI, ESP, MemOrReg, R12, R14, RAX, RBP, RDI, RDX, RSI, RSP,
+        X86Assembler, systemv_abi,
+    };
     #[test]
     fn simple_emit_test() {
+        let mut symbols = hvergelmir_elf::section::SymbolTableSection::default();
+
+        symbols.add_local(
+            c"fileout.o",
+            Symbol {
+                ty: hvergelmir_elf::section::SymbolType::File,
+                binding: hvergelmir_elf::section::SymbolBinding::Local,
+                visibility: hvergelmir_elf::section::SymbolVisibility::Default,
+                section: 0xfff1,
+                offset: 0,
+                size: 0,
+            },
+        );
+
+        let strthing = symbols.add_local(
+            c"strthing",
+            Symbol {
+                ty: hvergelmir_elf::section::SymbolType::Object,
+                binding: hvergelmir_elf::section::SymbolBinding::Local,
+                visibility: hvergelmir_elf::section::SymbolVisibility::Default,
+                section: 5,
+                offset: 0,
+                size: 5,
+            },
+        );
+
+        // symbols.add_local(c".text", Symbol {
+        //     ty: elf::section::SymbolType::Section,
+        //     binding: elf::section::SymbolBinding::Local,
+        //     visibility: elf::section::SymbolVisibility::Default,
+        //     section: 3,
+        //     offset: 0,
+        //     size: 0,
+        // });
+
+        let puts = symbols.add(
+            c"puts",
+            Symbol {
+                ty: hvergelmir_elf::section::SymbolType::NoType,
+                binding: hvergelmir_elf::section::SymbolBinding::Global,
+                visibility: hvergelmir_elf::section::SymbolVisibility::Default,
+                section: 0,
+                offset: 0,
+                size: 0,
+            },
+        );
+
         let mut asm = X86Assembler::new();
         // asm.push(MemOrReg::register(RBP));
         // asm.mov_reg(MemOrReg::register(RBP), MemOrReg::register(RSP));
@@ -475,73 +663,31 @@ mod tests {
         //     u32::from_le_bytes(hello_world[8..12].try_into().unwrap()),
         // );
 
-        let wr_idx_str = asm.mov_relocation(MemOrReg::register(RDI));
-        //asm.mov_imm32(MemOrReg::register(RAX), 1); // write syscall
-        // asm.mov_imm32(MemOrReg::register(RDI), 1); // to stdout
+        //let wr_idx_str = asm.mov_relocation(MemOrReg::register(RDI));
+        let wr_idx_str = 0;
+        asm.mov_symbol_address(systemv_abi::arg!(0), strthing);
+        // asm.mov_reg(
+        //     systemv_abi::arg!(0),
+        //     systemv_abi::arg!(1).displace(crate::Displacement::Disp8(8)),
+        // );
+        asm.near_call_symbol(puts); // thing
 
-
-        let wr_idx = asm.near_call_relative(0x000); // thing
-        //let wr_idx = 0;
-        // asm.mov_imm32(MemOrReg::register(RDX), 18); // eighteen bytes
-
-        // asm.syscall();
-        // asm.pop(MemOrReg::register(RBP)); // restore stack
         asm.ret();
-        
-        let mut v = asm.finish();
 
-        let mut symbols = hvergelmir_elf::section::SymbolTableSection::default();
+        let (v, relocations) = asm.finish();
 
-        symbols.add_local(c"fileout.o", Symbol {
-            ty: hvergelmir_elf::section::SymbolType::File,
-            binding: hvergelmir_elf::section::SymbolBinding::Local,
-            visibility: hvergelmir_elf::section::SymbolVisibility::Default,
-            section: 0xfff1,
-            offset: 0,
-            size: 0,
-        });
-    
-        symbols.add_local(c"strthing", Symbol {
-            ty: hvergelmir_elf::section::SymbolType::Object,
-            binding: hvergelmir_elf::section::SymbolBinding::Local,
-            visibility: hvergelmir_elf::section::SymbolVisibility::Default,
-            section: 5,
-            offset: 0,
-            size: 5,
-        });
+        let main = symbols.add(
+            c"main",
+            Symbol {
+                ty: hvergelmir_elf::section::SymbolType::Function,
+                binding: hvergelmir_elf::section::SymbolBinding::Global,
+                visibility: hvergelmir_elf::section::SymbolVisibility::Default,
+                section: 3,
+                offset: 0,
+                size: v.len() as u64,
+            },
+        );
 
-
-        // symbols.add_local(c".text", Symbol {
-        //     ty: elf::section::SymbolType::Section,
-        //     binding: elf::section::SymbolBinding::Local,
-        //     visibility: elf::section::SymbolVisibility::Default,
-        //     section: 3,
-        //     offset: 0,
-        //     size: 0,
-        // });
-    
-    
-        symbols.add(c"main", Symbol {
-            ty: hvergelmir_elf::section::SymbolType::Function,
-            binding: hvergelmir_elf::section::SymbolBinding::Global,
-            visibility: hvergelmir_elf::section::SymbolVisibility::Default,
-            section: 3,
-            offset: 0,
-            size: v.len() as u64,
-        });
-    
-        symbols.add(c"puts", Symbol {
-            ty: hvergelmir_elf::section::SymbolType::NoType,
-            binding: hvergelmir_elf::section::SymbolBinding::Global,
-            visibility: hvergelmir_elf::section::SymbolVisibility::Default,
-            section: 0,
-            offset: 0,
-            size: 0,
-        });
-    
-    
-
-    
         let mut elf = hvergelmir_elf::ELFHeader {
             abi: hvergelmir_elf::ABI::SystemV,
             file_type: hvergelmir_elf::FileType::Relocatable,
@@ -549,36 +695,26 @@ mod tests {
             entry_point: 0,
             strings: hvergelmir_elf::section::StringTableSection::default(),
             symbols,
-            program_data: hvergelmir_elf::section::ProgramDataSection {
-                data: v
-            },
+            program_data: hvergelmir_elf::section::ProgramDataSection { data: v },
             relocations: RelocationSection {
                 relocation_target: 3,
                 symbol_table: 2,
-                relocations: vec![
-                    Elf64AddendRelocation {
-                        offset: wr_idx_str as u64,
-                        symbol: 2,
-                        info: Elf64RelocationTypes_x86_64::BasicAddendOffset as u32,
-                        addend: 0
-                    },
-                    Elf64AddendRelocation {
-                        offset: wr_idx as u64,
-                        symbol: 4,
-                        info: Elf64RelocationTypes_x86_64::LRelativeWat as u32,
-                        addend: -4
-                    }
-                ]
+                relocations: relocations,
             },
             data: DataSection {
-                data: "HELLO WORLD HAHAH this is a null-terminated string of any length!?!\0".as_bytes().to_vec()
-            }
+                data: "GRASS WORLD HAHAH this is a null-terminated string of any length!?!\0"
+                    .as_bytes()
+                    .to_vec(),
+            },
         };
-    
+
         let mut out = vec![];
         elf.write(&mut out).unwrap();
-        std::fs::write("/Users/user/Documents/Programming/rust/hvergelmir/local/fileout.o", out).unwrap();
-
+        std::fs::write(
+            "/Users/user/Documents/Programming/rust/hvergelmir/local/fileout.o",
+            out,
+        )
+        .unwrap();
 
         // panic!("D: {:?}");
     }
